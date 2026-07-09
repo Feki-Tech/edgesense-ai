@@ -48,6 +48,13 @@ func envOr(key, fallback string) string {
 	return fallback
 }
 
+// topicMachineID extracts the machine id from a topic like
+// "edgesense/sensors/<machine_id>".
+func topicMachineID(topic string) string {
+	parts := strings.Split(topic, "/")
+	return parts[len(parts)-1]
+}
+
 func main() {
 	broker := envOr("EDGESENSE_BROKER", "tcp://localhost:11883")
 	inferenceURL := envOr("EDGESENSE_INFERENCE_URL", "http://localhost:8800/score")
@@ -74,8 +81,7 @@ func main() {
 			return
 		}
 		if r.MachineID == "" {
-			parts := strings.Split(msg.Topic(), "/")
-			r.MachineID = parts[len(parts)-1]
+			r.MachineID = topicMachineID(msg.Topic())
 		}
 
 		sr, err := score(httpClient, inferenceURL, r)

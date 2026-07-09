@@ -1,22 +1,28 @@
 """EdgeSense inference sidecar.
 
-Serves the trained IsolationForest over HTTP for the Go edge agent.
+Serves the trained model over HTTP for the Go edge agent.
 
     POST /score   {"vibration": .., "temperature": .., "current": ..}
-    -> {"score": -0.12, "is_anomaly": true}
+    -> {"score": -0.12, "is_anomaly": true, "reason": "model"}
 
-Score is the IsolationForest decision function: negative means anomalous.
+Score is the IsolationForest decision function (negative = anomalous);
+is_anomaly combines the model verdict with hard z-score limits
+(see ml/scoring.py).
 """
 
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 import joblib
-import numpy as np
 from fastapi import FastAPI
 from pydantic import BaseModel
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from ml.scoring import score_sample  # noqa: E402
 
 MODEL_PATH = Path(os.environ.get(
     "EDGESENSE_MODEL",
@@ -25,7 +31,6 @@ MODEL_PATH = Path(os.environ.get(
 
 app = FastAPI(title="EdgeSense Inference")
 _bundle = joblib.load(MODEL_PATH)
-_pipeline = _bundle["pipeline"]
 _features = _bundle["features"]
 
 
@@ -42,6 +47,5 @@ def healthz() -> dict:
 
 @app.post("/score")
 def score(reading: Reading) -> dict:
-    x = np.array([[getattr(reading, f) for f in _features]])
-    s = float(_pipeline.decision_function(x)[0])
-    return {"score": round(s, 5), "is_anomaly": bool(_pipeline.predict(x)[0] == -1)}
+    s, anomaly, reason = score_sample(_bundle, [getattr(reading, f) for f in _features])
+    return {"score": round(s, 5), "is_anomaly": anomaly, "reason": reason}

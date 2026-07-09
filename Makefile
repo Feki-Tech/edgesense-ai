@@ -1,12 +1,12 @@
 VENV := .venv
 PY := $(VENV)/bin/python
 
-.PHONY: setup deps broker broker-down train inference agent simulate dashboard smoke
+.PHONY: setup deps broker broker-down train inference agent simulate dashboard smoke test
 
 setup:
 	python3 -m venv $(VENV)
 	$(PY) -m pip install --upgrade pip
-	$(PY) -m pip install -r requirements.txt
+	$(PY) -m pip install -r requirements-dev.txt
 	cd edge-agent && go mod tidy
 
 broker:
@@ -32,3 +32,7 @@ dashboard:
 
 smoke:
 	$(PY) scripts/smoke.py
+
+test:
+	$(PY) -m pytest
+	cd edge-agent && go test ./...

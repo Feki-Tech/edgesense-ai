@@ -69,7 +69,7 @@ def main() -> None:
     print(f"validation: detection rate on faults      = {tp:.3%}")
 
     MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
-    joblib.dump({"pipeline": model, "features": FEATURES}, MODEL_PATH)
+    joblib.dump({"pipeline": model, "features": FEATURES, "z_guard": 6.0}, MODEL_PATH)
     print(f"model saved -> {MODEL_PATH}")
 
 

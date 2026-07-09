@@ -30,7 +30,7 @@ sensors at the edge, ML inference on the node, and only *events* go upstream.
 ## Quickstart
 
 ```bash
-make setup        # venv + python deps + go deps
+make setup        # venv + python deps (incl. dev) + go deps
 make broker       # start mosquitto (docker)
 make train        # train + validate the anomaly model
 
@@ -42,6 +42,16 @@ make dashboard    # :8501
 
 make smoke        # end-to-end check (broker + inference + event round-trip)
 ```
+
+## Testing & CI
+
+```bash
+make test         # pytest (model quality, API, simulator) + go test (agent)
+```
+
+GitHub Actions (`.github/workflows/ci.yml`) runs both suites on every push
+and pull request: a Python 3.12 job (`pytest`) and a Go 1.22 job
+(`go vet`, `go build`, `go test`).
 
 ## MQTT topics
 

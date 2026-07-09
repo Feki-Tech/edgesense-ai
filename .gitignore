@@ -5,5 +5,5 @@ ml/model/
 .idea/
 .vscode/
 edge-agent/edge-agent
-go.sum
 .run/
+.pytest_cache/
