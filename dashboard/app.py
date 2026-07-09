@@ -19,7 +19,7 @@ from streamlit_autorefresh import st_autorefresh
 import paho.mqtt.client as mqtt
 
 BROKER = "localhost"
-PORT = 1883
+PORT = 11883
 MAX_POINTS = 600
 SIGNALS = ["vibration", "temperature", "current"]
 

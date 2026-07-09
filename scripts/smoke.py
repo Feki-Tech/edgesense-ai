@@ -14,7 +14,7 @@ import time
 import paho.mqtt.client as mqtt
 import requests
 
-BROKER, PORT = "localhost", 1883
+BROKER, PORT = "localhost", 11883
 INFERENCE = "http://localhost:8800"
 MACHINE = "machine-smoke"
 
@@ -37,7 +37,6 @@ def main() -> int:
 
     events: list[dict] = []
     client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="edgesense-smoke")
-    client.on_message = lambda *_a, msg=None: None  # replaced below
 
     def on_message(_c, _u, msg) -> None:
         events.append(json.loads(msg.payload))

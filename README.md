@@ -45,6 +45,9 @@ make smoke        # end-to-end check (broker + inference + event round-trip)
 
 ## MQTT topics
 
+The broker listens on host port **11883** (1883 sits in a Windows/Hyper-V
+reserved port range when running under WSL2 + Docker Desktop).
+
 - `edgesense/sensors/<machine_id>` — raw readings (JSON), ~2 Hz per machine
 - `edgesense/events/<machine_id>` — anomaly events only (JSON, with score)
 

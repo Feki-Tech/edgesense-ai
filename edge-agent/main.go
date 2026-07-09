@@ -49,7 +49,7 @@ func envOr(key, fallback string) string {
 }
 
 func main() {
-	broker := envOr("EDGESENSE_BROKER", "tcp://localhost:1883")
+	broker := envOr("EDGESENSE_BROKER", "tcp://localhost:11883")
 	inferenceURL := envOr("EDGESENSE_INFERENCE_URL", "http://localhost:8800/score")
 	sensorTopic := envOr("EDGESENSE_SENSOR_TOPIC", "edgesense/sensors/#")
 

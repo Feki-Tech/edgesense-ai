@@ -75,7 +75,7 @@ class Machine:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--broker", default="localhost")
-    ap.add_argument("--port", type=int, default=1883)
+    ap.add_argument("--port", type=int, default=11883)
     ap.add_argument("--machines", type=int, default=3)
     ap.add_argument("--interval", type=float, default=0.5, help="seconds between readings")
     ap.add_argument("--anomaly-prob", type=float, default=0.01,

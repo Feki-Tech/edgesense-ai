@@ -6,3 +6,4 @@ ml/model/
 .vscode/
 edge-agent/edge-agent
 go.sum
+.run/
