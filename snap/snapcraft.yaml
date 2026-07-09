@@ -1,0 +1,33 @@
+name: edgesense-agent
+base: core24
+version: '0.1.0'
+summary: On-device anomaly detection agent (MQTT -> inference -> events)
+description: |
+  EdgeSense edge agent. Subscribes to raw sensor readings over MQTT, scores
+  each reading against the EdgeSense inference service and publishes anomaly
+  events — only events leave the node. Events that cannot be published are
+  buffered on disk ($SNAP_COMMON) and flushed when the broker returns.
+
+  Configure via snap environment or a wrapper:
+    EDGESENSE_BROKER         (default tcp://localhost:11883)
+    EDGESENSE_INFERENCE_URL  (default http://localhost:8800/score)
+    EDGESENSE_SENSOR_TOPIC   (default edgesense/sensors/#)
+grade: devel
+confinement: strict
+
+apps:
+  edgesense-agent:
+    command: bin/agent
+    daemon: simple
+    restart-condition: always
+    plugs:
+      - network
+    environment:
+      EDGESENSE_BUFFER: $SNAP_COMMON/event-buffer.jsonl
+
+parts:
+  edge-agent:
+    plugin: go
+    source: edge-agent/
+    build-snaps:
+      - go/1.22/stable

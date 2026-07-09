@@ -21,11 +21,12 @@ sensors at the edge, ML inference on the node, and only *events* go upstream.
 | Path         | Role                                                              |
 |--------------|-------------------------------------------------------------------|
 | `simulator/` | Simulates machines publishing vibration / temperature / current over MQTT, with injected fault episodes (bearing fault, overheat, overload). |
-| `ml/`        | Trains an IsolationForest on normal operating data → `ml/model/model.joblib`. |
+| `ml/`        | Trains an IsolationForest on normal operating data → `ml/model/model.joblib`; hybrid scoring helpers (`scoring.py`); ONNX export (`export_onnx.py`). |
 | `inference/` | FastAPI sidecar serving the model (`POST /score`).                 |
-| `edge-agent/`| Go agent: subscribes to sensor topics, scores each reading, publishes anomaly events. |
+| `edge-agent/`| Go agent: subscribes to sensor topics, scores each reading, publishes anomaly events with store-and-forward buffering. |
 | `dashboard/` | Streamlit live dashboard: signals, anomaly scores, event feed.     |
 | `deploy/`    | Mosquitto broker config (docker compose).                          |
+| `snap/`      | Snapcraft packaging for the edge agent (Ubuntu Core ready).        |
 
 ## Quickstart
 
@@ -43,10 +44,48 @@ make dashboard    # :8501
 make smoke        # end-to-end check (broker + inference + event round-trip)
 ```
 
+## Anomaly detection
+
+Scoring is hybrid (`ml/scoring.py`): a reading is anomalous if the
+IsolationForest flags it **or** any feature deviates more than `z_guard`
+(default 6σ) from the training distribution. The guard catches single-feature
+outliers (e.g. pure overheat) that isolation forests systematically miss.
+Responses carry a `reason` field: `model`, `limit`, or `model+limit`.
+
+## Store-and-forward
+
+The agent publishes events with QoS 1. If the broker is unreachable, events
+are appended to a disk-backed FIFO (`EDGESENSE_BUFFER`, JSON Lines, capped at
+10k entries, oldest dropped first) and flushed on reconnect plus every 30 s.
+Events survive agent restarts.
+
+## ONNX export
+
+```bash
+make export-onnx   # -> ml/model/model.onnx + model.onnx.json (scaler + guard params)
+```
+
+`tests/test_onnx.py` asserts parity between onnxruntime and sklearn
+(score MAE < 1e-3, label agreement > 99%). The exported model plus the
+sidecar-free metadata file are the path to running inference directly in the
+Go agent (roadmap).
+
+## Snap packaging
+
+`snap/snapcraft.yaml` packages the agent as a strictly-confined daemon
+(core24, Go plugin, auto-restart, buffer in `$SNAP_COMMON`). Build on a
+machine with snapcraft:
+
+```bash
+sudo snap install snapcraft --classic
+make snap          # or: snapcraft pack
+sudo snap install ./edgesense-agent_0.1.0_amd64.snap --dangerous
+```
+
 ## Testing & CI
 
 ```bash
-make test         # pytest (model quality, API, simulator) + go test (agent)
+make test         # pytest (model quality, API, simulator, ONNX parity) + go test (agent + buffer)
 ```
 
 GitHub Actions (`.github/workflows/ci.yml`) runs both suites on every push
@@ -59,11 +98,12 @@ The broker listens on host port **11883** (1883 sits in a Windows/Hyper-V
 reserved port range when running under WSL2 + Docker Desktop).
 
 - `edgesense/sensors/<machine_id>` — raw readings (JSON), ~2 Hz per machine
-- `edgesense/events/<machine_id>` — anomaly events only (JSON, with score)
+- `edgesense/events/<machine_id>` — anomaly events only (JSON, with score + reason)
 
 ## Ideas / roadmap
 
-- Package agent + inference as snaps (Ubuntu Core), model updates as snap refreshes
-- Replace IsolationForest with an autoencoder, export to ONNX for the Go agent (drop the sidecar)
-- CoAP uplink for constrained/LTE links, store-and-forward buffering
+- Run ONNX inference inside the Go agent (onnxruntime bindings), drop the sidecar
+- Replace IsolationForest with an autoencoder for richer fault signatures
+- CoAP uplink for constrained/LTE links
 - Fleet view: many virtual devices via docker compose scale
+- Inference service as a second snap; model updates as snap refreshes

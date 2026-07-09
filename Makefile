@@ -1,7 +1,7 @@
 VENV := .venv
 PY := $(VENV)/bin/python
 
-.PHONY: setup deps broker broker-down train inference agent simulate dashboard smoke test
+.PHONY: setup deps broker broker-down train export-onnx inference agent simulate dashboard smoke test snap
 
 setup:
 	python3 -m venv $(VENV)
@@ -17,6 +17,9 @@ broker-down:
 
 train:
 	$(PY) ml/train.py
+
+export-onnx:
+	$(PY) ml/export_onnx.py
 
 inference:
 	$(PY) -m uvicorn inference.server:app --host 0.0.0.0 --port 8800
@@ -36,3 +39,6 @@ smoke:
 test:
 	$(PY) -m pytest
 	cd edge-agent && go test ./...
+
+snap:
+	snapcraft pack --verbosity=brief

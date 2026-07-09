@@ -7,3 +7,9 @@ ml/model/
 edge-agent/edge-agent
 .run/
 .pytest_cache/
+event-buffer.jsonl
+event-buffer.jsonl.tmp
+*.snap
+parts/
+stage/
+prime/
