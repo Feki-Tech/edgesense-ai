@@ -1,7 +1,16 @@
 VENV := .venv
 PY := $(VENV)/bin/python
 
-.PHONY: setup deps broker broker-down train export-onnx inference agent simulate dashboard smoke test snap
+.PHONY: setup deps broker broker-down train export-onnx inference agent simulate dashboard smoke test snap stack stack-down stack-logs
+
+stack:
+	docker compose up -d --build
+
+stack-down:
+	docker compose down
+
+stack-logs:
+	docker compose logs -f --tail 50
 
 setup:
 	python3 -m venv $(VENV)

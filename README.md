@@ -28,7 +28,27 @@ sensors at the edge, ML inference on the node, and only *events* go upstream.
 | `deploy/`    | Mosquitto broker config (docker compose).                          |
 | `snap/`      | Snapcraft packaging for the edge agent (Ubuntu Core ready).        |
 
-## Quickstart
+Every service ships a Dockerfile; `docker-compose.yml` wires them together
+on an internal network (broker hostname `mosquitto`).
+
+## Quickstart (Docker, recommended)
+
+```bash
+make stack        # build + start broker, inference, agent, simulator, dashboard
+make stack-logs   # follow logs
+make smoke        # end-to-end check from the host (needs `make setup` once)
+make stack-down   # stop everything
+```
+
+- Dashboard: http://localhost:8501
+- Inference API: http://localhost:8800/healthz
+- Broker (host access): localhost:11883
+
+The inference image bakes a freshly trained model at build time; the agent is
+a distroless static Go binary with its event buffer on a named volume
+(`agent-data`), so buffered events survive container restarts.
+
+## Quickstart (local processes)
 
 ```bash
 make setup        # venv + python deps (incl. dev) + go deps

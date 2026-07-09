@@ -1,0 +1,16 @@
+.git
+.venv
+.run
+.idea
+.vscode
+__pycache__
+**/__pycache__
+.pytest_cache
+ml/model
+edge-agent/edge-agent
+event-buffer.jsonl*
+*.snap
+parts
+stage
+prime
+tests

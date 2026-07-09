@@ -7,6 +7,7 @@ live signal plots with anomaly markers plus an event feed.
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 from collections import defaultdict, deque
@@ -18,8 +19,8 @@ from streamlit_autorefresh import st_autorefresh
 
 import paho.mqtt.client as mqtt
 
-BROKER = "localhost"
-PORT = 11883
+BROKER = os.environ.get("EDGESENSE_BROKER_HOST", "localhost")
+PORT = int(os.environ.get("EDGESENSE_BROKER_PORT", "11883"))
 MAX_POINTS = 600
 SIGNALS = ["vibration", "temperature", "current"]
 
@@ -108,8 +109,9 @@ if events:
     ev_df = pd.DataFrame(events)
     ev_df["time"] = pd.to_datetime(ev_df["ts"], unit="s").dt.strftime("%H:%M:%S")
     reading_df = pd.json_normalize(ev_df["reading"])
+    cols_to_show = [c for c in ("time", "machine_id", "score", "reason") if c in ev_df]
     show = pd.concat(
-        [ev_df[["time", "machine_id", "score"]],
+        [ev_df[cols_to_show],
          reading_df[["vibration", "temperature", "current"]]], axis=1)
     st.dataframe(show, use_container_width=True, height=280)
 else:

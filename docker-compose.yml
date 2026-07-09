@@ -7,3 +7,50 @@ services:
     volumes:
       - ./deploy/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
     restart: unless-stopped
+
+  inference:
+    build:
+      context: .
+      dockerfile: inference/Dockerfile
+    container_name: edgesense-inference
+    ports:
+      - "8800:8800"
+    restart: unless-stopped
+
+  agent:
+    build: ./edge-agent
+    container_name: edgesense-agent
+    environment:
+      EDGESENSE_BROKER: tcp://mosquitto:1883
+      EDGESENSE_INFERENCE_URL: http://inference:8800/score
+      EDGESENSE_BUFFER: /data/event-buffer.jsonl
+    volumes:
+      - agent-data:/data
+    depends_on:
+      mosquitto:
+        condition: service_started
+      inference:
+        condition: service_healthy
+    restart: unless-stopped
+
+  simulator:
+    build: ./simulator
+    container_name: edgesense-simulator
+    depends_on:
+      - mosquitto
+    restart: unless-stopped
+
+  dashboard:
+    build: ./dashboard
+    container_name: edgesense-dashboard
+    ports:
+      - "8501:8501"
+    environment:
+      EDGESENSE_BROKER_HOST: mosquitto
+      EDGESENSE_BROKER_PORT: "1883"
+    depends_on:
+      - mosquitto
+    restart: unless-stopped
+
+volumes:
+  agent-data:
