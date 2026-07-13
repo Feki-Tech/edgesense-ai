@@ -16,6 +16,7 @@ even when the uplink is down.
                       ┌──────────────┐       ┌────────────┐
                       │ cloud broker │ ────► │ dashboard  │
                       └──────────────┘       └────────────┘
+   agent /metrics ──► Prometheus ──► Grafana (provisioned dashboard)
 ```
 
 ## Use cases
@@ -35,6 +36,10 @@ even when the uplink is down.
 - **Bandwidth economics** — raw telemetry stays on the node; only anomalies
   leave. At 2 Hz × 3 sensors a machine emits ~50 MB/day of raw data but
   typically **zero** upstream bytes on a healthy day.
+- **Fleet operations** — every agent exports Prometheus metrics (readings/s,
+  anomaly rates, buffer depth, uplink status, inference latency); a
+  provisioned Grafana dashboard shows the whole fleet at a glance, and
+  `make fleet MACHINES=25` scales the simulated plant on the spot.
 
 ## Quickstart (Docker, recommended)
 
@@ -45,9 +50,16 @@ make smoke        # end-to-end check from the host (needs `make setup` once)
 make stack-down   # stop everything
 ```
 
-- Dashboard: http://localhost:8501
-- Inference API: http://localhost:8800/healthz
+- Dashboard: http://localhost:8501 · Grafana: http://localhost:3000 (no login)
+- Inference API: http://localhost:8800/healthz · Agent health/metrics: http://localhost:8890/healthz
+- Prometheus: http://localhost:9090
 - Local broker (sensors): localhost:11883 · Cloud broker (events): localhost:12883
+
+Scale the simulated fleet without touching anything else:
+
+```bash
+make fleet MACHINES=25   # recreates the simulator with 25 virtual machines
+```
 
 The inference image bakes a freshly trained model at build time; the agent is
 a distroless static Go binary with its event buffer on a named volume
@@ -91,17 +103,23 @@ Kills the cloud broker, injects faults while it is down, restores it, and
 verifies the buffered events (docker CLI required):
 
 ```
-[1/4] baseline: uplink healthy — first event after 0.2s
+[1/4] baseline: uplink healthy — first event after 0.3s
 [2/4] stopping cloud broker (edgesense-mosquitto-cloud) — uplink is now DOWN
       injected bearing_fault(machine-02) + overload(machine-03); events are buffering on the edge…
+      agent metrics confirm: edgesense_buffer_depth = 36 events on disk
       events that reached the cloud during the outage: 0
 [3/4] restoring cloud broker — ok
-[4/4] replay: 33 buffered events delivered after restore (no duplicates)
-      machines: machine-01, machine-02, machine-03   original-reading age at delivery: 4.1s … 20.4s
+[4/4] replay: 35 buffered events delivered after restore (no duplicates)
+      machines: machine-02, machine-03   original-reading age at delivery: 12.5s … 27.4s
       every event kept its original reading timestamp from inside the outage
+      agent metrics confirm: edgesense_buffer_depth = 0 (buffer fully drained)
 
-VERDICT: PASS — 33 events preserved across a 16.7s uplink outage
+VERDICT: PASS — 35 events preserved across a 15.4s uplink outage
 ```
+
+Watch it live in Grafana (http://localhost:3000): the uplink stat flips to
+DOWN, the buffer-depth panel climbs during the outage and snaps back to zero
+on replay.
 
 ### 3. Offline model evaluation — `make eval`
 
@@ -127,7 +145,7 @@ contamination budget).
 | `edge-agent/`| Go agent: subscribes to sensor topics, scores each reading, publishes anomaly events to the uplink broker with store-and-forward buffering. |
 | `dashboard/` | Streamlit live dashboard: signals, anomaly markers, event feed.    |
 | `scripts/`   | Self-verifying demos (`demo.py`, `demo_offline.py`) and smoke test. |
-| `deploy/`    | Mosquitto broker config (docker compose).                          |
+| `deploy/`    | Mosquitto config, Prometheus scrape config, Grafana provisioning (datasource + fleet dashboard). |
 | `snap/`      | Snapcraft packaging for the edge agent (Ubuntu Core ready).        |
 
 Every service ships a Dockerfile; `docker-compose.yml` wires them together on
@@ -179,6 +197,32 @@ Events survive agent restarts. `make demo-offline` proves all of this live.
 | `EDGESENSE_INFERENCE_URL` | `http://localhost:8800/score` | scoring sidecar |
 | `EDGESENSE_SENSOR_TOPIC` | `edgesense/sensors/#` | subscription filter |
 | `EDGESENSE_BUFFER` | `event-buffer.jsonl` | store-and-forward file |
+| `EDGESENSE_METRICS_ADDR` | `:8890` | Prometheus metrics + healthz listener |
+
+## Observability
+
+The agent exposes its operational state on `EDGESENSE_METRICS_ADDR`:
+
+- `GET /healthz` → `{"status":"ok","uplink_connected":true,"buffer_depth":0}`
+- `GET /metrics` → Prometheus text format
+
+| Metric | Type | Meaning |
+|---|---|---|
+| `edgesense_readings_scored_total{machine}` | counter | readings scored per machine |
+| `edgesense_score_failures_total` | counter | readings lost to inference errors |
+| `edgesense_anomalies_total{machine,reason}` | counter | flagged readings by trigger |
+| `edgesense_events_published_total` | counter | events delivered upstream (incl. replays) |
+| `edgesense_events_buffered_total` | counter | events written to the disk buffer |
+| `edgesense_buffer_depth` | gauge | events currently waiting on disk |
+| `edgesense_uplink_connected` | gauge | 1 while the uplink connection is open |
+| `edgesense_inference_latency_seconds` | histogram | scoring round-trip latency |
+
+The compose stack ships Prometheus (scraping the agent every 5 s) and Grafana
+with an auto-provisioned **EdgeSense AI — fleet & agent** dashboard
+(anonymous access, no login): uplink status, buffer depth, per-machine
+reading/anomaly rates, and p50/p95 inference latency. `make demo-offline`
+asserts against these metrics — the buffer-depth gauge must drain to zero
+after the replay.
 
 ## ONNX export
 
@@ -227,5 +271,5 @@ Windows/Hyper-V reserved port range when running under WSL2 + Docker Desktop).
 - Run ONNX inference inside the Go agent (onnxruntime bindings), drop the sidecar
 - Replace IsolationForest with an autoencoder for richer fault signatures
 - CoAP uplink for constrained/LTE links
-- Fleet view: many virtual devices via docker compose scale
+- Alerting: Grafana alert rules on buffer depth / uplink downtime
 - Inference service as a second snap; model updates as snap refreshes

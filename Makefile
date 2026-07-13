@@ -1,7 +1,8 @@
 VENV := .venv
 PY := $(VENV)/bin/python
+MACHINES ?= 10
 
-.PHONY: setup deps broker broker-down train export-onnx inference agent simulate dashboard smoke test snap stack stack-down stack-logs demo demo-offline eval
+.PHONY: setup deps broker broker-down train export-onnx inference agent simulate dashboard smoke test snap stack stack-down stack-logs demo demo-offline eval fleet
 
 stack:
 	docker compose up -d --build
@@ -20,6 +21,9 @@ demo-offline:    ## uplink-outage / store-and-forward demo (stops+restarts cloud
 
 eval:            ## offline model evaluation -> docs/EVALUATION.md
 	$(PY) ml/evaluate.py --out docs/EVALUATION.md
+
+fleet:           ## scale the simulated fleet, e.g. make fleet MACHINES=25
+	EDGESENSE_MACHINES=$(MACHINES) docker compose up -d simulator
 
 setup:
 	python3 -m venv $(VENV)

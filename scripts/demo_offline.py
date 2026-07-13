@@ -6,6 +6,9 @@ while it is down — the agent keeps detecting and buffers every event to
 disk — then restores the broker and verifies the buffered events are
 replayed with their original timestamps.
 
+The agent's own Prometheus metrics (edgesense_buffer_depth) are polled to
+show the buffer filling during the outage and draining to zero afterwards.
+
 Requires: `make stack` and the docker CLI.
 
     python scripts/demo_offline.py
@@ -19,6 +22,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.request
 
 import paho.mqtt.client as mqtt
 
@@ -26,11 +30,25 @@ BROKER = os.environ.get("EDGESENSE_BROKER_HOST", "localhost")
 PORT = int(os.environ.get("EDGESENSE_BROKER_PORT", "11883"))
 UPLINK_PORT = int(os.environ.get("EDGESENSE_UPLINK_PORT", "12883"))
 CLOUD_CONTAINER = os.environ.get("EDGESENSE_CLOUD_CONTAINER", "edgesense-mosquitto-cloud")
+METRICS_URL = os.environ.get("EDGESENSE_METRICS_URL", "http://localhost:8890/metrics")
 CONTROL_TOPIC = "edgesense/control/fault"
 
 
 def docker(*args: str) -> subprocess.CompletedProcess:
     return subprocess.run(["docker", *args], capture_output=True, text=True)
+
+
+def agent_metric(name: str) -> float | None:
+    """Read one gauge/counter from the agent's Prometheus endpoint."""
+    try:
+        with urllib.request.urlopen(METRICS_URL, timeout=2) as resp:
+            text = resp.read().decode()
+    except OSError:
+        return None
+    for line in text.splitlines():
+        if line.startswith(name + " "):
+            return float(line.split()[1])
+    return None
 
 
 class EventLog:
@@ -92,6 +110,7 @@ def main() -> int:
 
     print("=== EdgeSense AI — uplink outage / store-and-forward demo ===\n")
     ok = True
+    depth_during = None
     try:
         # 1: prove the uplink works
         t0 = time.time()
@@ -114,6 +133,10 @@ def main() -> int:
         print("      injected bearing_fault(machine-02) + overload(machine-03);"
               " events are buffering on the edge…")
         time.sleep(14)  # both episodes (~8s) plus margin
+        depth_during = agent_metric("edgesense_buffer_depth")
+        if depth_during is not None:
+            print(f"      agent metrics confirm: edgesense_buffer_depth = {depth_during:.0f}"
+                  " events on disk")
         outage_end = time.time()
         leaked = log.since(outage_start)
         print(f"      events that reached the cloud during the outage: {len(leaked)}")
@@ -142,6 +165,13 @@ def main() -> int:
               f"{delays[0]:.1f}s … {delays[-1]:.1f}s")
         print("      every event kept its original reading timestamp from inside the outage")
         ok &= dupes == 0
+
+    depth_after = agent_metric("edgesense_buffer_depth")
+    if depth_after is not None:
+        drained = depth_after == 0
+        print(f"      agent metrics confirm: edgesense_buffer_depth = {depth_after:.0f}"
+              f" ({'buffer fully drained' if drained else 'BUFFER NOT DRAINED'})")
+        ok &= drained
 
     outage_len = outage_end - outage_start
     print(f"\nVERDICT: {'PASS' if ok else 'FAIL'} — "

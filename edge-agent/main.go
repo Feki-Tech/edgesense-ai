@@ -9,6 +9,9 @@
 // cloud broker over a flaky LTE link). By default the uplink is the local
 // broker. Events that cannot be published (uplink outage) are buffered on
 // disk and flushed on reconnect — no event is lost.
+//
+// Operational state is exposed on EDGESENSE_METRICS_ADDR: Prometheus
+// metrics on /metrics, liveness on /healthz (see metrics.go).
 package main
 
 import (
@@ -29,6 +32,7 @@ import (
 const (
 	publishTimeout = 2 * time.Second
 	flushInterval  = 30 * time.Second
+	statusInterval = 2 * time.Second
 	bufferCapacity = 10_000
 )
 
@@ -75,10 +79,12 @@ func main() {
 	inferenceURL := envOr("EDGESENSE_INFERENCE_URL", "http://localhost:8800/score")
 	sensorTopic := envOr("EDGESENSE_SENSOR_TOPIC", "edgesense/sensors/#")
 	bufferPath := envOr("EDGESENSE_BUFFER", "event-buffer.jsonl")
+	metricsAddr := envOr("EDGESENSE_METRICS_ADDR", ":8890")
 	splitUplink := uplinkBroker != broker
 
 	httpClient := &http.Client{Timeout: 2 * time.Second}
 	buffer := newEventBuffer(bufferPath, bufferCapacity)
+	bufferDepth.Set(float64(buffer.Len())) // events may have survived a restart
 
 	var localClient, uplinkClient mqtt.Client
 
@@ -98,11 +104,16 @@ func main() {
 		if !tok.WaitTimeout(publishTimeout) {
 			return fmt.Errorf("publish timeout on %s", topic)
 		}
-		return tok.Error()
+		if err := tok.Error(); err != nil {
+			return err
+		}
+		eventsPublished.Inc()
+		return nil
 	}
 
 	flush := func(trigger string) {
 		n, err := buffer.DrainTo(publishEvent)
+		bufferDepth.Set(float64(buffer.Len()))
 		if n > 0 {
 			log.Printf("flushed %d buffered event(s) (%s)", n, trigger)
 		}
@@ -124,12 +135,15 @@ func main() {
 
 		sr, err := score(httpClient, inferenceURL, r)
 		if err != nil {
+			scoreFailures.Inc()
 			log.Printf("score failed for %s: %v", r.MachineID, err)
 			return
 		}
+		readingsScored.WithLabelValues(r.MachineID).Inc()
 		if !sr.IsAnomaly {
 			return
 		}
+		anomalies.WithLabelValues(r.MachineID, sr.Reason).Inc()
 
 		ev := event{
 			MachineID: r.MachineID,
@@ -144,6 +158,8 @@ func main() {
 				log.Printf("EVENT LOST for %s (publish: %v, buffer: %v)", r.MachineID, err, berr)
 				return
 			}
+			eventsBuffered.Inc()
+			bufferDepth.Set(float64(buffer.Len()))
 			log.Printf("uplink publish failed (%v), event buffered (%d pending)", err, buffer.Len())
 			return
 		}
@@ -192,6 +208,15 @@ func main() {
 		uplinkClient = localClient
 	}
 
+	serveMetrics(metricsAddr, func() map[string]any {
+		return map[string]any{
+			"status":           "ok",
+			"uplink_connected": uplinkClient.IsConnectionOpen(),
+			"buffer_depth":     buffer.Len(),
+		}
+	})
+	log.Printf("metrics on %s (/metrics, /healthz)", metricsAddr)
+
 	if tok := localClient.Connect(); tok.Wait() && tok.Error() != nil {
 		log.Fatalf("mqtt connect (local %s): %v", broker, tok.Error())
 	}
@@ -212,6 +237,18 @@ func main() {
 		}
 	}()
 
+	statusTicker := time.NewTicker(statusInterval)
+	defer statusTicker.Stop()
+	go func() {
+		for range statusTicker.C {
+			if uplinkClient.IsConnectionOpen() {
+				uplinkUp.Set(1)
+			} else {
+				uplinkUp.Set(0)
+			}
+		}
+	}()
+
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 	<-sig
@@ -228,6 +265,7 @@ func score(hc *http.Client, url string, r reading) (*scoreResponse, error) {
 		"temperature": r.Temperature,
 		"current":     r.Current,
 	})
+	start := time.Now()
 	resp, err := hc.Post(url, "application/json", bytes.NewReader(body))
 	if err != nil {
 		return nil, err
@@ -240,5 +278,6 @@ func score(hc *http.Client, url string, r reading) (*scoreResponse, error) {
 	if err := json.NewDecoder(resp.Body).Decode(&sr); err != nil {
 		return nil, err
 	}
+	inferenceLatency.Observe(time.Since(start).Seconds())
 	return &sr, nil
 }
