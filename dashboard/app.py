@@ -1,7 +1,8 @@
 """EdgeSense live dashboard (Streamlit).
 
-Subscribes to sensor readings and anomaly events over MQTT and renders
-live signal plots with anomaly markers plus an event feed.
+Subscribes to sensor readings (local broker) and anomaly events (uplink
+broker — same as local unless EDGESENSE_UPLINK_HOST/PORT differ) over MQTT
+and renders live signal plots with anomaly markers plus an event feed.
 """
 
 from __future__ import annotations
@@ -21,6 +22,8 @@ import paho.mqtt.client as mqtt
 
 BROKER = os.environ.get("EDGESENSE_BROKER_HOST", "localhost")
 PORT = int(os.environ.get("EDGESENSE_BROKER_PORT", "11883"))
+UPLINK = os.environ.get("EDGESENSE_UPLINK_HOST", BROKER)
+UPLINK_PORT = int(os.environ.get("EDGESENSE_UPLINK_PORT", str(PORT)))
 MAX_POINTS = 600
 SIGNALS = ["vibration", "temperature", "current"]
 
@@ -28,20 +31,27 @@ SIGNALS = ["vibration", "temperature", "current"]
 class Collector:
     """Background MQTT subscriber accumulating readings and events."""
 
-    def __init__(self, broker: str, port: int) -> None:
+    def __init__(self, endpoints: list[tuple[str, int, list[str]]]) -> None:
         self.lock = threading.Lock()
         self.readings: dict[str, deque] = defaultdict(lambda: deque(maxlen=MAX_POINTS))
         self.events: deque = deque(maxlen=200)
+        self.clients: list[mqtt.Client] = []
 
-        self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2,
-                                  client_id=f"edgesense-dashboard-{int(time.time())}")
-        self.client.on_connect = self._on_connect
-        self.client.on_message = self._on_message
-        self.client.connect(broker, port)
-        self.client.loop_start()
+        for i, (host, port, topics) in enumerate(endpoints):
+            client = mqtt.Client(
+                mqtt.CallbackAPIVersion.VERSION2,
+                client_id=f"edgesense-dashboard-{i}-{int(time.time())}")
+            client.on_connect = self._make_on_connect(topics)
+            client.on_message = self._on_message
+            client.connect(host, port)
+            client.loop_start()
+            self.clients.append(client)
 
-    def _on_connect(self, client, *_args) -> None:
-        client.subscribe([("edgesense/sensors/#", 0), ("edgesense/events/#", 0)])
+    @staticmethod
+    def _make_on_connect(topics: list[str]):
+        def on_connect(client, *_args) -> None:
+            client.subscribe([(t, 0) for t in topics])
+        return on_connect
 
     def _on_message(self, _client, _userdata, msg) -> None:
         try:
@@ -63,7 +73,12 @@ class Collector:
 
 @st.cache_resource
 def get_collector() -> Collector:
-    return Collector(BROKER, PORT)
+    if (BROKER, PORT) == (UPLINK, UPLINK_PORT):
+        endpoints = [(BROKER, PORT, ["edgesense/sensors/#", "edgesense/events/#"])]
+    else:
+        endpoints = [(BROKER, PORT, ["edgesense/sensors/#"]),
+                     (UPLINK, UPLINK_PORT, ["edgesense/events/#"])]
+    return Collector(endpoints)
 
 
 st.set_page_config(page_title="EdgeSense AI", layout="wide")

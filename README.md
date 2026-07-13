@@ -1,40 +1,45 @@
 # EdgeSense AI
 
 On-device anomaly detection for industrial machines:
-sensors at the edge, ML inference on the node, and only *events* go upstream.
+sensors at the edge, ML inference on the node, and only *events* go upstream —
+even when the uplink is down.
 
 ```
-┌────────────┐  MQTT   ┌─────────────┐  HTTP   ┌──────────────┐
-│ simulator  │ ──────► │ edge-agent  │ ──────► │ inference    │
-│ (sensors)  │ sensors │ (Go)        │ /score  │ (FastAPI +   │
-└────────────┘         │             │ ◄────── │  IsolationF.)│
-                       └─────┬───────┘         └──────────────┘
-                             │ MQTT: edgesense/events/#  (anomalies only)
-                             ▼
-                       ┌────────────┐
-                       │ dashboard  │  (Streamlit, live plots + alerts)
-                       └────────────┘
+┌───────────┐ sensors  ┌────────────┐ /score  ┌────────────┐
+│ simulator │ ───────► │ edge-agent │ ──────► │ inference  │
+│ 3 machines│   MQTT   │    (Go)    │ ◄────── │ (FastAPI + │
+└───────────┘  (local  │ disk buffer│   HTTP  │  Isol.F.)  │
+      ▲        broker) └─────┬──────┘         └────────────┘
+      │                      │ anomaly events only · QoS 1
+      │ edgesense/control/   │ store-and-forward uplink
+      │ fault (demos)        ▼
+                      ┌──────────────┐       ┌────────────┐
+                      │ cloud broker │ ────► │ dashboard  │
+                      └──────────────┘       └────────────┘
 ```
 
-## Components
+## Use cases
 
-| Path         | Role                                                              |
-|--------------|-------------------------------------------------------------------|
-| `simulator/` | Simulates machines publishing vibration / temperature / current over MQTT, with injected fault episodes (bearing fault, overheat, overload). |
-| `ml/`        | Trains an IsolationForest on normal operating data → `ml/model/model.joblib`; hybrid scoring helpers (`scoring.py`); ONNX export (`export_onnx.py`). |
-| `inference/` | FastAPI sidecar serving the model (`POST /score`).                 |
-| `edge-agent/`| Go agent: subscribes to sensor topics, scores each reading, publishes anomaly events with store-and-forward buffering. |
-| `dashboard/` | Streamlit live dashboard: signals, anomaly scores, event feed.     |
-| `deploy/`    | Mosquitto broker config (docker compose).                          |
-| `snap/`      | Snapcraft packaging for the edge agent (Ubuntu Core ready).        |
-
-Every service ships a Dockerfile; `docker-compose.yml` wires them together
-on an internal network (broker hostname `mosquitto`).
+- **Predictive maintenance** — a worn bearing shows up as a 3–5× vibration
+  multiple long before it seizes. EdgeSense raises the alarm on the **first
+  faulty reading (~0.5 s at 2 Hz)** — see the demo below.
+- **Thermal runaway protection** — overheat is a *single-feature* drift that
+  isolation forests systematically miss; the hybrid z-score guard catches it
+  immediately (that failure mode was found by this repo's own test suite).
+- **Overload / energy monitoring** — current excursions from jams or failing
+  motors are flagged with a machine-readable `reason`, ready for maintenance
+  ticketing.
+- **Flaky uplinks (LTE, satellite, remote sites)** — detection never stops
+  during an uplink outage; events buffer on disk and replay **exactly once,
+  with original timestamps**, on reconnect.
+- **Bandwidth economics** — raw telemetry stays on the node; only anomalies
+  leave. At 2 Hz × 3 sensors a machine emits ~50 MB/day of raw data but
+  typically **zero** upstream bytes on a healthy day.
 
 ## Quickstart (Docker, recommended)
 
 ```bash
-make stack        # build + start broker, inference, agent, simulator, dashboard
+make stack        # build + start both brokers, inference, agent, simulator, dashboard
 make stack-logs   # follow logs
 make smoke        # end-to-end check from the host (needs `make setup` once)
 make stack-down   # stop everything
@@ -42,11 +47,92 @@ make stack-down   # stop everything
 
 - Dashboard: http://localhost:8501
 - Inference API: http://localhost:8800/healthz
-- Broker (host access): localhost:11883
+- Local broker (sensors): localhost:11883 · Cloud broker (events): localhost:12883
 
 The inference image bakes a freshly trained model at build time; the agent is
 a distroless static Go binary with its event buffer on a named volume
 (`agent-data`), so buffered events survive container restarts.
+
+## Demos
+
+Three scripted, self-verifying demos run against the live stack.
+
+### 1. Fault injection with measured time-to-detect — `make demo`
+
+Injects a bearing fault, an overheat and an overload into the running
+simulator (MQTT control topic), then measures detection against ground truth:
+
+```
+--- scenario 1/3: bearing_fault on machine-01 ---
+    worn bearing → vibration 3–5×, current +10–25%
+    detected on reading #1 after 0.00s — 24/24 faulty readings flagged
+    trigger reasons: limit×3, model+limit×21
+
+=== summary ===
+fault           machine       time-to-detect        flagged   reasons                  result
+bearing_fault   machine-01    0.00s (reading #1)    24/24     limit×3, model+limit×21  PASS
+overheat        machine-02    0.00s (reading #1)    24/24     limit×22, model+limit×2  PASS
+overload        machine-03    0.00s (reading #1)    24/24     limit×7, model+limit×17  PASS
+
+false positives: 0 across 171 healthy readings (0.0%; model is tuned for ~0.5%)
+VERDICT: PASS
+```
+
+Inject your own faults while watching the dashboard:
+
+```bash
+mosquitto_pub -p 11883 -t edgesense/control/fault \
+  -m '{"machine_id": "machine-02", "fault": "overheat", "ticks": 30}'
+```
+
+### 2. Uplink outage with zero event loss — `make demo-offline`
+
+Kills the cloud broker, injects faults while it is down, restores it, and
+verifies the buffered events (docker CLI required):
+
+```
+[1/4] baseline: uplink healthy — first event after 0.2s
+[2/4] stopping cloud broker (edgesense-mosquitto-cloud) — uplink is now DOWN
+      injected bearing_fault(machine-02) + overload(machine-03); events are buffering on the edge…
+      events that reached the cloud during the outage: 0
+[3/4] restoring cloud broker — ok
+[4/4] replay: 33 buffered events delivered after restore (no duplicates)
+      machines: machine-01, machine-02, machine-03   original-reading age at delivery: 4.1s … 20.4s
+      every event kept its original reading timestamp from inside the outage
+
+VERDICT: PASS — 33 events preserved across a 16.7s uplink outage
+```
+
+### 3. Offline model evaluation — `make eval`
+
+Replays the simulator's physics offline (25 episodes per fault, 20k healthy
+readings) and writes [`docs/EVALUATION.md`](docs/EVALUATION.md):
+
+| Fault | Episodes detected | Median time-to-detect | Reading recall |
+|---|---|---|---|
+| bearing_fault | 25/25 (100%) | 1 reading (~0.5 s) | 100% |
+| overheat | 25/25 (100%) | 1 reading (~0.5 s) | 100% |
+| overload | 25/25 (100%) | 1 reading (~0.5 s) | 100% |
+
+False positives on healthy data: **0.48%** (the IsolationForest's tuned
+contamination budget).
+
+## Components
+
+| Path         | Role                                                              |
+|--------------|-------------------------------------------------------------------|
+| `simulator/` | Simulates machines publishing vibration / temperature / current over MQTT, with random or on-demand (control-topic) fault episodes. |
+| `ml/`        | Trains an IsolationForest on normal operating data → `ml/model/model.joblib`; hybrid scoring (`scoring.py`); offline evaluation (`evaluate.py`); ONNX export (`export_onnx.py`). |
+| `inference/` | FastAPI sidecar serving the model (`POST /score`).                 |
+| `edge-agent/`| Go agent: subscribes to sensor topics, scores each reading, publishes anomaly events to the uplink broker with store-and-forward buffering. |
+| `dashboard/` | Streamlit live dashboard: signals, anomaly markers, event feed.    |
+| `scripts/`   | Self-verifying demos (`demo.py`, `demo_offline.py`) and smoke test. |
+| `deploy/`    | Mosquitto broker config (docker compose).                          |
+| `snap/`      | Snapcraft packaging for the edge agent (Ubuntu Core ready).        |
+
+Every service ships a Dockerfile; `docker-compose.yml` wires them together on
+an internal network with two brokers: `mosquitto` (local sensor bus) and
+`mosquitto-cloud` (stand-in for a remote event broker).
 
 ## Quickstart (local processes)
 
@@ -64,6 +150,9 @@ make dashboard    # :8501
 make smoke        # end-to-end check (broker + inference + event round-trip)
 ```
 
+Without `EDGESENSE_UPLINK_BROKER` set, the agent uses a single broker for
+sensors and events — the demos and dashboard handle both layouts.
+
 ## Anomaly detection
 
 Scoring is hybrid (`ml/scoring.py`): a reading is anomalous if the
@@ -74,10 +163,22 @@ Responses carry a `reason` field: `model`, `limit`, or `model+limit`.
 
 ## Store-and-forward
 
-The agent publishes events with QoS 1. If the broker is unreachable, events
-are appended to a disk-backed FIFO (`EDGESENSE_BUFFER`, JSON Lines, capped at
-10k entries, oldest dropped first) and flushed on reconnect plus every 30 s.
-Events survive agent restarts.
+The agent publishes events with QoS 1 to the uplink broker. If the uplink is
+unreachable, events are appended to a disk-backed FIFO (`EDGESENSE_BUFFER`,
+JSON Lines, capped at 10k entries, oldest dropped first) and flushed on
+reconnect plus every 30 s. The disk buffer is the single owner of offline
+events (publishes are gated on a live connection), so replay is duplicate-free.
+Events survive agent restarts. `make demo-offline` proves all of this live.
+
+### Agent configuration
+
+| Env var | Default | Purpose |
+|---|---|---|
+| `EDGESENSE_BROKER` | `tcp://localhost:11883` | local broker (sensor bus) |
+| `EDGESENSE_UPLINK_BROKER` | = `EDGESENSE_BROKER` | broker events are published to |
+| `EDGESENSE_INFERENCE_URL` | `http://localhost:8800/score` | scoring sidecar |
+| `EDGESENSE_SENSOR_TOPIC` | `edgesense/sensors/#` | subscription filter |
+| `EDGESENSE_BUFFER` | `event-buffer.jsonl` | store-and-forward file |
 
 ## ONNX export
 
@@ -105,20 +206,21 @@ sudo snap install ./edgesense-agent_0.1.0_amd64.snap --dangerous
 ## Testing & CI
 
 ```bash
-make test         # pytest (model quality, API, simulator, ONNX parity) + go test (agent + buffer)
+make test         # pytest (model quality, API, simulator, evaluation, ONNX parity) + go test
 ```
 
 GitHub Actions (`.github/workflows/ci.yml`) runs both suites on every push
 and pull request: a Python 3.12 job (`pytest`) and a Go 1.22 job
 (`go vet`, `go build`, `go test`).
 
-## MQTT topics
+## MQTT topics & ports
 
-The broker listens on host port **11883** (1883 sits in a Windows/Hyper-V
-reserved port range when running under WSL2 + Docker Desktop).
+Host ports: local broker **11883**, cloud broker **12883** (1883 sits in a
+Windows/Hyper-V reserved port range when running under WSL2 + Docker Desktop).
 
-- `edgesense/sensors/<machine_id>` — raw readings (JSON), ~2 Hz per machine
-- `edgesense/events/<machine_id>` — anomaly events only (JSON, with score + reason)
+- `edgesense/sensors/<machine_id>` — raw readings (JSON), ~2 Hz per machine (local broker)
+- `edgesense/events/<machine_id>` — anomaly events only (JSON, with score + reason; uplink broker)
+- `edgesense/control/fault` — on-demand fault injection for demos (local broker)
 
 ## Ideas / roadmap
 

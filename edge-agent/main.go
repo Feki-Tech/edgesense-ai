@@ -1,9 +1,14 @@
 // EdgeSense edge agent.
 //
-// Subscribes to raw sensor readings on MQTT, scores each reading against the
-// inference sidecar, and publishes an event to edgesense/events/<machine_id>
-// when a reading is anomalous. Only events leave the node. Events that cannot
-// be published (broker outage) are buffered on disk and flushed on reconnect.
+// Subscribes to raw sensor readings on the local MQTT broker, scores each
+// reading against the inference sidecar, and publishes an event to
+// edgesense/events/<machine_id> when a reading is anomalous. Only events
+// leave the node.
+//
+// Events are published to the uplink broker (EDGESENSE_UPLINK_BROKER, e.g. a
+// cloud broker over a flaky LTE link). By default the uplink is the local
+// broker. Events that cannot be published (uplink outage) are buffered on
+// disk and flushed on reconnect — no event is lost.
 package main
 
 import (
@@ -66,22 +71,30 @@ func topicMachineID(topic string) string {
 
 func main() {
 	broker := envOr("EDGESENSE_BROKER", "tcp://localhost:11883")
+	uplinkBroker := envOr("EDGESENSE_UPLINK_BROKER", broker)
 	inferenceURL := envOr("EDGESENSE_INFERENCE_URL", "http://localhost:8800/score")
 	sensorTopic := envOr("EDGESENSE_SENSOR_TOPIC", "edgesense/sensors/#")
 	bufferPath := envOr("EDGESENSE_BUFFER", "event-buffer.jsonl")
+	splitUplink := uplinkBroker != broker
 
 	httpClient := &http.Client{Timeout: 2 * time.Second}
 	buffer := newEventBuffer(bufferPath, bufferCapacity)
 
-	var client mqtt.Client
+	var localClient, uplinkClient mqtt.Client
 
 	publishEvent := func(ev event) error {
 		payload, err := json.Marshal(ev)
 		if err != nil {
 			return err
 		}
+		// Gate on a live connection: paho would otherwise queue the message
+		// internally while reconnecting AND we'd buffer it, delivering it
+		// twice after an outage. The disk buffer owns offline events.
+		if !uplinkClient.IsConnectionOpen() {
+			return fmt.Errorf("uplink not connected")
+		}
 		topic := fmt.Sprintf("edgesense/events/%s", ev.MachineID)
-		tok := client.Publish(topic, 1, false, payload)
+		tok := uplinkClient.Publish(topic, 1, false, payload)
 		if !tok.WaitTimeout(publishTimeout) {
 			return fmt.Errorf("publish timeout on %s", topic)
 		}
@@ -131,14 +144,14 @@ func main() {
 				log.Printf("EVENT LOST for %s (publish: %v, buffer: %v)", r.MachineID, err, berr)
 				return
 			}
-			log.Printf("publish failed (%v), event buffered (%d pending)", err, buffer.Len())
+			log.Printf("uplink publish failed (%v), event buffered (%d pending)", err, buffer.Len())
 			return
 		}
 		log.Printf("ANOMALY %s score=%.4f reason=%s vib=%.2f temp=%.1f cur=%.2f",
 			r.MachineID, sr.Score, sr.Reason, r.Vibration, r.Temperature, r.Current)
 	}
 
-	opts := mqtt.NewClientOptions().
+	localOpts := mqtt.NewClientOptions().
 		AddBroker(broker).
 		SetClientID("edgesense-agent").
 		SetAutoReconnect(true).
@@ -148,23 +161,52 @@ func main() {
 				log.Printf("subscribe failed: %v", tok.Error())
 				return
 			}
-			log.Printf("connected to %s, subscribed %s", broker, sensorTopic)
-			go flush("reconnect")
+			log.Printf("connected to local broker %s, subscribed %s", broker, sensorTopic)
+			if !splitUplink {
+				go flush("reconnect")
+			}
 		}).
 		SetConnectionLostHandler(func(_ mqtt.Client, err error) {
-			log.Printf("connection lost: %v (events will be buffered)", err)
+			log.Printf("local broker connection lost: %v", err)
 		})
+	localClient = mqtt.NewClient(localOpts)
 
-	client = mqtt.NewClient(opts)
-	if tok := client.Connect(); tok.Wait() && tok.Error() != nil {
-		log.Fatalf("mqtt connect: %v", tok.Error())
+	if splitUplink {
+		uplinkOpts := mqtt.NewClientOptions().
+			AddBroker(uplinkBroker).
+			SetClientID("edgesense-agent-uplink").
+			SetAutoReconnect(true).
+			SetConnectRetry(true).
+			SetConnectRetryInterval(2 * time.Second).
+			SetMaxReconnectInterval(10 * time.Second).
+			SetOrderMatters(false).
+			SetOnConnectHandler(func(_ mqtt.Client) {
+				log.Printf("uplink connected: %s", uplinkBroker)
+				go flush("uplink reconnect")
+			}).
+			SetConnectionLostHandler(func(_ mqtt.Client, err error) {
+				log.Printf("uplink connection lost: %v (events will be buffered)", err)
+			})
+		uplinkClient = mqtt.NewClient(uplinkOpts)
+	} else {
+		uplinkClient = localClient
+	}
+
+	if tok := localClient.Connect(); tok.Wait() && tok.Error() != nil {
+		log.Fatalf("mqtt connect (local %s): %v", broker, tok.Error())
+	}
+	if splitUplink {
+		// ConnectRetry keeps trying in the background; an unreachable uplink
+		// at startup is survivable — events buffer until it comes up.
+		uplinkClient.Connect()
+		log.Printf("uplink broker: %s (store-and-forward active)", uplinkBroker)
 	}
 
 	ticker := time.NewTicker(flushInterval)
 	defer ticker.Stop()
 	go func() {
 		for range ticker.C {
-			if client.IsConnected() && buffer.Len() > 0 {
+			if uplinkClient.IsConnectionOpen() && buffer.Len() > 0 {
 				flush("periodic")
 			}
 		}
@@ -174,7 +216,10 @@ func main() {
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 	<-sig
 	log.Printf("shutting down (%d buffered events retained)", buffer.Len())
-	client.Disconnect(250)
+	if splitUplink {
+		uplinkClient.Disconnect(250)
+	}
+	localClient.Disconnect(250)
 }
 
 func score(hc *http.Client, url string, r reading) (*scoreResponse, error) {

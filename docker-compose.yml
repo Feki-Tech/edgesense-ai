@@ -8,6 +8,18 @@ services:
       - ./deploy/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
     restart: unless-stopped
 
+  # Stands in for a remote/cloud broker reached over a flaky uplink (LTE, sat).
+  # Stop it (make demo-offline) to watch the agent buffer events and replay
+  # them on reconnect.
+  mosquitto-cloud:
+    image: eclipse-mosquitto:2
+    container_name: edgesense-mosquitto-cloud
+    ports:
+      - "12883:1883"
+    volumes:
+      - ./deploy/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+    restart: unless-stopped
+
   inference:
     build:
       context: .
@@ -22,12 +34,15 @@ services:
     container_name: edgesense-agent
     environment:
       EDGESENSE_BROKER: tcp://mosquitto:1883
+      EDGESENSE_UPLINK_BROKER: tcp://mosquitto-cloud:1883
       EDGESENSE_INFERENCE_URL: http://inference:8800/score
       EDGESENSE_BUFFER: /data/event-buffer.jsonl
     volumes:
       - agent-data:/data
     depends_on:
       mosquitto:
+        condition: service_started
+      mosquitto-cloud:
         condition: service_started
       inference:
         condition: service_healthy
@@ -48,8 +63,11 @@ services:
     environment:
       EDGESENSE_BROKER_HOST: mosquitto
       EDGESENSE_BROKER_PORT: "1883"
+      EDGESENSE_UPLINK_HOST: mosquitto-cloud
+      EDGESENSE_UPLINK_PORT: "1883"
     depends_on:
       - mosquitto
+      - mosquitto-cloud
     restart: unless-stopped
 
 volumes:

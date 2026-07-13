@@ -13,3 +13,4 @@ event-buffer.jsonl.tmp
 parts/
 stage/
 prime/
+edge-agent/agent
