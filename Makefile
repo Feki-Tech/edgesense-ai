@@ -2,7 +2,7 @@ VENV := .venv
 PY := $(VENV)/bin/python
 MACHINES ?= 10
 
-.PHONY: setup deps broker broker-down train export-onnx inference agent simulate dashboard smoke test snap stack stack-down stack-logs demo demo-offline eval fleet
+.PHONY: setup deps broker broker-down train export-onnx inference agent simulate dashboard smoke test snap stack stack-down stack-logs demo demo-offline eval benchmark fleet
 
 stack:
 	docker compose up -d --build
@@ -21,6 +21,9 @@ demo-offline:    ## uplink-outage / store-and-forward demo (stops+restarts cloud
 
 eval:            ## offline model evaluation -> docs/EVALUATION.md
 	$(PY) ml/evaluate.py --out docs/EVALUATION.md
+
+benchmark:       ## public-dataset benchmark (downloads AI4I 2020 once) -> docs/BENCHMARK.md
+	$(PY) ml/benchmark_public.py --out docs/BENCHMARK.md
 
 fleet:           ## scale the simulated fleet, e.g. make fleet MACHINES=25
 	EDGESENSE_MACHINES=$(MACHINES) docker compose up -d simulator

@@ -8,7 +8,7 @@ even when the uplink is down.
 ┌───────────┐ sensors  ┌────────────┐ /score  ┌────────────┐
 │ simulator │ ───────► │ edge-agent │ ──────► │ inference  │
 │ 3 machines│   MQTT   │    (Go)    │ ◄────── │ (FastAPI + │
-└───────────┘  (local  │ disk buffer│   HTTP  │  Isol.F.)  │
+└───────────┘  (local  │ disk buffer│   HTTP  │  autoenc.) │
       ▲        broker) └─────┬──────┘         └────────────┘
       │                      │ anomaly events only · QoS 1
       │ edgesense/control/   │ store-and-forward uplink
@@ -25,8 +25,10 @@ even when the uplink is down.
   multiple long before it seizes. EdgeSense raises the alarm on the **first
   faulty reading (~0.5 s at 2 Hz)** — see the demo below.
 - **Thermal runaway protection** — overheat is a *single-feature* drift that
-  isolation forests systematically miss; the hybrid z-score guard catches it
-  immediately (that failure mode was found by this repo's own test suite).
+  isolation forests systematically missed (a failure mode found by this
+  repo's own test suite); the autoencoder's reconstruction error flags it on
+  the first reading, with the hybrid z-score guard as a certified hard
+  backstop.
 - **Overload / energy monitoring** — current excursions from jams or failing
   motors are flagged with a machine-readable `reason`, ready for maintenance
   ticketing.
@@ -132,15 +134,25 @@ readings) and writes [`docs/EVALUATION.md`](docs/EVALUATION.md):
 | overheat | 25/25 (100%) | 1 reading (~0.5 s) | 100% |
 | overload | 25/25 (100%) | 1 reading (~0.5 s) | 100% |
 
-False positives on healthy data: **0.48%** (the IsolationForest's tuned
-contamination budget).
+False positives on healthy data: **0.43%** (the autoencoder's calibrated
+false-alarm budget).
+
+### 4. Public-dataset benchmark — `make benchmark`
+
+Cross-checks the same architecture and calibration against real industrial
+data: it trains on the healthy rows of the [AI4I 2020 Predictive Maintenance
+dataset](https://archive.ics.uci.edu/dataset/601) (UCI, 10k milling readings,
+labeled failure modes) and writes per-failure-mode recall and ROC-AUC to
+[`docs/BENCHMARK.md`](docs/BENCHMARK.md). The CSV (~0.5 MB) is downloaded
+once into `ml/data/` (gitignored); the pipeline itself is covered by an
+offline test with synthetic data, so CI never touches the network.
 
 ## Components
 
 | Path         | Role                                                              |
 |--------------|-------------------------------------------------------------------|
 | `simulator/` | Simulates machines publishing vibration / temperature / current over MQTT, with random or on-demand (control-topic) fault episodes. |
-| `ml/`        | Trains an IsolationForest on normal operating data → `ml/model/model.joblib`; hybrid scoring (`scoring.py`); offline evaluation (`evaluate.py`); ONNX export (`export_onnx.py`). |
+| `ml/`        | Trains a small autoencoder on normal operating data (sklearn or PyTorch backend) → `ml/model/model.joblib`; hybrid scoring (`scoring.py`); offline evaluation (`evaluate.py`); ONNX export (`export_onnx.py`). |
 | `inference/` | FastAPI sidecar serving the model (`POST /score`).                 |
 | `edge-agent/`| Go agent: subscribes to sensor topics, scores each reading, publishes anomaly events to the uplink broker with store-and-forward buffering. |
 | `dashboard/` | Streamlit live dashboard: signals, anomaly markers, event feed.    |
@@ -173,11 +185,35 @@ sensors and events — the demos and dashboard handle both layouts.
 
 ## Anomaly detection
 
-Scoring is hybrid (`ml/scoring.py`): a reading is anomalous if the
-IsolationForest flags it **or** any feature deviates more than `z_guard`
-(default 6σ) from the training distribution. The guard catches single-feature
-outliers (e.g. pure overheat) that isolation forests systematically miss.
-Responses carry a `reason` field: `model`, `limit`, or `model+limit`.
+The model is a small autoencoder (3 → 16 → 2 → 16 → 3, tanh) trained on
+healthy operating data only. Healthy readings pass through the 2-unit
+bottleneck almost unchanged; faults don't, so the mean squared reconstruction
+error in scaled feature space is the anomaly score (**higher = more
+anomalous**). The alarm threshold is calibrated on held-out healthy data at
+the 99.5% quantile (~0.5% false-alarm budget). Two interchangeable training
+backends emit the exact same bundle format — raw numpy weights, so inference
+needs neither torch nor a fitted sklearn estimator:
+
+```bash
+make train                                      # sklearn MLPRegressor (default; CI + Docker)
+.venv/bin/python ml/train.py --backend torch    # PyTorch (pip install -r requirements-torch.txt; CUDA if available)
+.venv/bin/python ml/train.py --model iforest    # legacy IsolationForest baseline, for comparison
+```
+
+Scoring stays hybrid (`ml/scoring.py`): a reading is anomalous if the
+reconstruction error exceeds the calibrated threshold **or** any feature
+deviates more than `z_guard` (default 6σ) from the training distribution.
+The guard is the certified hard limit for single-feature drift and a
+backstop for anything the model might learn to reconstruct. Responses carry
+a `reason` field: `model`, `limit`, or `model+limit`.
+
+Compared head-to-head with the IsolationForest baseline (`ml/evaluate.py
+--model <bundle>`), the autoencoder lifts model-side detection on synthetic
+faults from ~61% to 100% of faulty readings at a slightly lower
+false-positive rate — every alarm now carries the model's signature instead
+of leaning on the limit guard. On real industrial data the same pipeline
+separates labeled failure modes that per-feature limits cannot see at all —
+see [`docs/BENCHMARK.md`](docs/BENCHMARK.md).
 
 ## Store-and-forward
 
@@ -227,13 +263,16 @@ after the replay.
 ## ONNX export
 
 ```bash
-make export-onnx   # -> ml/model/model.onnx + model.onnx.json (scaler + guard params)
+make export-onnx   # -> ml/model/model.onnx + model.onnx.json (scaler + guard + threshold)
 ```
 
-`tests/test_onnx.py` asserts parity between onnxruntime and sklearn
-(score MAE < 1e-3, label agreement > 99%). The exported model plus the
-sidecar-free metadata file are the path to running inference directly in the
-Go agent (roadmap).
+The exported graph (~2 KiB) is self-contained: scaler, autoencoder weights
+and the calibrated alarm threshold are baked in as constants — raw features
+in, reconstruction-error score and 0/1 anomaly label out.
+`tests/test_onnx.py` asserts parity between onnxruntime and the numpy scorer
+(relative score MAE < 1e-3, label agreement > 99%). The exported model plus
+the sidecar-free metadata file are the path to running inference directly in
+the Go agent (roadmap).
 
 ## Snap packaging
 
@@ -250,7 +289,7 @@ sudo snap install ./edgesense-agent_0.1.0_amd64.snap --dangerous
 ## Testing & CI
 
 ```bash
-make test         # pytest (model quality, API, simulator, evaluation, ONNX parity) + go test
+make test         # pytest (model quality, API, simulator, evaluation, ONNX parity, benchmark pipeline, optional torch backend) + go test
 ```
 
 GitHub Actions (`.github/workflows/ci.yml`) runs both suites on every push
@@ -268,8 +307,19 @@ Windows/Hyper-V reserved port range when running under WSL2 + Docker Desktop).
 
 ## Ideas / roadmap
 
-- Run ONNX inference inside the Go agent (onnxruntime bindings), drop the sidecar
-- Replace IsolationForest with an autoencoder for richer fault signatures
-- CoAP uplink for constrained/LTE links
-- Alerting: Grafana alert rules on buffer depth / uplink downtime
-- Inference service as a second snap; model updates as snap refreshes
+- [ ] Run ONNX inference inside the Go agent (onnxruntime bindings), drop the sidecar
+- [x] Replace IsolationForest with an autoencoder for richer fault signatures
+- [ ] CoAP uplink for constrained/LTE links
+- [ ] Alerting: Grafana alert rules on buffer depth / uplink downtime
+- [ ] Inference service as a second snap; model updates as snap refreshes
+
+## References
+
+- M. Feki, *Data Quality Model for Synthetic Image Data in Production*,
+  Master's thesis, Technische Universität Berlin, Computer Vision & Remote
+  Sensing — the author's related work on data quality for ML in production,
+  which motivates the healthy-data-quality-first approach used here (train on
+  verified healthy data only, calibrate the alarm budget on held-out data).
+- S. Matzka, *AI4I 2020 Predictive Maintenance Dataset*, UCI Machine Learning
+  Repository, 2020. <https://archive.ics.uci.edu/dataset/601> (CC BY 4.0) —
+  used by `make benchmark` ([`docs/BENCHMARK.md`](docs/BENCHMARK.md)).

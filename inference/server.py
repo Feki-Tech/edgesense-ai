@@ -3,10 +3,11 @@
 Serves the trained model over HTTP for the Go edge agent.
 
     POST /score   {"vibration": .., "temperature": .., "current": ..}
-    -> {"score": -0.12, "is_anomaly": true, "reason": "model"}
+    -> {"score": 38.2, "is_anomaly": true, "reason": "model"}
 
-Score is the IsolationForest decision function (negative = anomalous);
-is_anomaly combines the model verdict with hard z-score limits
+Score is the autoencoder's mean squared reconstruction error in scaled
+feature space (higher = more anomalous); is_anomaly combines the model
+verdict (error above the calibrated threshold) with hard z-score limits
 (see ml/scoring.py).
 """
 
@@ -42,7 +43,8 @@ class Reading(BaseModel):
 
 @app.get("/healthz")
 def healthz() -> dict:
-    return {"status": "ok", "model": str(MODEL_PATH), "features": _features}
+    return {"status": "ok", "model": str(MODEL_PATH), "features": _features,
+            "model_kind": _bundle.get("kind", "iforest")}
 
 
 @app.post("/score")
