@@ -1,14 +1,16 @@
 # EdgeSense AI — Glossary
 
-The definitions book for the repo and the platform design
-([`PLATFORM.md`](PLATFORM.md)). Definitions of **current** behavior are grounded in the
-code (file references given). Terms introduced by the platform design are marked
-***(proposed)*** — they describe intent, not shipped behavior.
+The definitions book for the repo, the platform design
+([`PLATFORM.md`](PLATFORM.md)) and the security chapter
+([`SECURITY.md`](SECURITY.md)). Definitions of **current** behavior are grounded in the
+code (file references given). Terms introduced by the platform design or the security
+chapter are marked ***(proposed)*** — they describe intent, not shipped behavior.
 
 Groups: [Domain & telemetry](#domain--telemetry) ·
 [Detection](#detection) ·
 [Transport & reliability](#transport--reliability) ·
-[Platform & identity](#platform--identity)
+[Platform & identity](#platform--identity) ·
+[Security](#security)
 
 ---
 
@@ -215,3 +217,74 @@ sides authenticate cryptographically. Phase 3 device identity: the uplink listen
 requires client certs, the certificate CN (= `device_uid`) becomes the broker username,
 rotation is EST-style renewal of short-lived certs, revocation is registry-driven
 disable plus short lifetimes.
+
+---
+
+## Security
+
+*Terms used by [`SECURITY.md`](SECURITY.md). All controls in this group are
+**proposed** — today both brokers are anonymous and no link uses TLS
+(`deploy/mosquitto.conf`, `edge-agent/uplink.go`); the only current entries are the
+threat terms, which name attacks the current state permits.*
+
+**TLS (Transport Layer Security)** — the standard channel encryption + server
+authentication protocol; for MQTT it runs on port 8883 (`ssl://` URLs, which the
+agent's uplink already routes to paho unchanged — the seam exists, the configuration
+doesn't). Server-side TLS is the `SECURITY.md` phase P0 step; **mTLS** (client certs
+too) is defined under [Platform & identity](#platform--identity).
+
+**DTLS (Datagram TLS)** — TLS adapted to UDP datagrams (DTLS 1.2, RFC 6347; 1.3,
+RFC 9147), the standard way to secure CoAP (`coaps://`, port 5684). PSK mode avoids
+certificate weight on constrained links; Connection IDs (RFC 9146) survive NAT
+rebinding without re-handshakes. `edge-agent/uplink.go` currently rejects `coaps://`
+as "not supported yet" *(current)*; DTLS-PSK is the P5 target. Hop-by-hop: protection
+ends at the CoAP receiver.
+
+**OSCORE** — Object Security for Constrained RESTful Environments (RFC 8613): encrypts
+each CoAP request/response at the message layer instead of the transport, so protection
+is end-to-end across proxies and needs no handshake after link drops — a natural fit
+for the agent's store-and-forward uplink. Tracked as a follow-up to DTLS in
+`SECURITY.md` §3.2 because mature Go support is lacking.
+
+**ACL (access control list)** — per-principal allow rules; on an MQTT broker,
+per-username topic read/write patterns. The P0 quick win is an ACL making
+`edgesense/control/fault` writable only by an `ops` user — closing today's
+anyone-can-inject-faults hole. Broker mechanics under
+[Broker ACL](#platform--identity).
+
+**SBOM (software bill of materials)** — a machine-readable inventory (SPDX/CycloneDX)
+of every component in an artifact, generated at build time (e.g. syft) so
+vulnerability answers ("do we ship xz 5.6.0?") are lookups, not archaeology. Planned
+per container image in CI (P1).
+
+**Secure boot** — firmware verifies the signature of each boot stage (bootloader →
+kernel → OS) so only trusted code runs; on Ubuntu Core devices it combines with TPM-
+backed full-disk encryption. Relevant only for real fleet hardware — noted in
+`SECURITY.md` §5, out of scope for the Docker demo.
+
+**TPM / secure element** — tamper-resistant hardware that generates and holds private
+keys as non-exportable objects (TPM 2.0, ATECC608). Target home for the device's mTLS
+key (P3): the agent signs via the chip (PKCS#11 / go-tpm), so malware can use the key
+while running but never steal it.
+
+**Provisioning token (bootstrap token)** — the one-time, expiring secret that lets a
+factory-fresh device request its first certificate: token + CSR in, signed cert out
+(`PLATFORM.md` §4.3). Single-use and bound to a `device_uid`, so a leaked token can
+enroll at most one impostor, and only until it expires.
+
+**Revocation** — invalidating a device identity before its credential expires:
+registry-driven dynsec disable at the broker (immediate refusal, no device contact
+needed) plus short cert lifetimes as the backstop, with CRLs deliberately secondary
+(`PLATFORM.md` §4.3). Step 1 of decommissioning (`SECURITY.md` §5).
+
+**Data poisoning** — corrupting *training* data so the learned model itself is wrong —
+for EdgeSense: feeding abnormal readings labeled as healthy so a retrained autoencoder
+learns to accept a developing fault. No field-data training path exists today
+*(current)*, so the live risk is nil until retraining lands — which is why
+authenticated sensor ingest (P0) is a prerequisite for it (`SECURITY.md` §2.4).
+
+**Evasion** — crafting *inference-time* inputs that a correct model still misses: fault
+signatures held under both the reconstruction-error threshold and the 6σ z-guard
+(`ml/scoring.py`). Today's open `/score` endpoint is a free tuning oracle for this
+(`SECURITY.md` §2.4); a network attacker can add evasive readings but cannot remove
+the real sensor stream.
