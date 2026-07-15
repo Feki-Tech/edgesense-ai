@@ -15,9 +15,10 @@ Groups: [Domain & telemetry](#domain--telemetry) ·
 ## Domain & telemetry
 
 **Machine** — the monitored physical asset (pump, press, motor). Identified by
-`machine_id`, a free-form string taken from the reading payload, with the last topic
-segment as fallback (`topicMachineID`, `edge-agent/main.go`). The unit of scoring,
-alerting, and per-machine metrics.
+`machine_id`, a free-form string taken from the reading payload, with the machine
+topic segment as fallback (`machineIDFromTopic`, `edge-agent/topics.go`: 4th segment
+under `es/<org>/<site>/<machine>/…`, last segment in the legacy layout). The unit of
+scoring, alerting, and per-machine metrics.
 
 **Device** — the compute endpoint running the edge agent. In this codebase Machine and
 Device are 1:1 (the agent ships as one snap daemon per node, `snap/snapcraft.yaml`), so

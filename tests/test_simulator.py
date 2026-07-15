@@ -5,7 +5,8 @@ from __future__ import annotations
 import json
 import random
 
-from simulator.simulate import FAULT_TYPES, Machine, apply_control
+from simulator.simulate import (FAULT_TYPES, Machine, apply_control,
+                                control_filter, control_machine_id, sensor_topic)
 
 
 def make_machine(seed: int = 42) -> Machine:
@@ -85,3 +86,50 @@ def test_control_ignores_garbage() -> None:
         out = apply_control(fleet, payload)
         assert "ignored" in out
     assert m.fault is None
+
+
+def test_control_machine_from_topic_wins() -> None:
+    # per-machine control: the topic addresses the machine (that is what the
+    # broker ACLs scope), payload machine_id is ignored
+    m = make_machine()
+    apply_control({"m-test": m},
+                  json.dumps({"machine_id": "someone-else", "fault": "overheat", "ticks": 4}),
+                  machine_id="m-test")
+    assert m.fault == "overheat"
+    assert m.fault_ticks_left == 4
+
+
+def test_control_topic_machine_unknown_is_ignored() -> None:
+    m = make_machine()
+    out = apply_control({"m-test": m},
+                        json.dumps({"fault": "overheat"}), machine_id="ghost")
+    assert "ignored" in out
+    assert m.fault is None
+
+
+def test_control_payload_machine_still_works_without_topic() -> None:
+    # legacy global topic path: machine comes from the payload
+    m = make_machine()
+    apply_control({"m-test": m},
+                  json.dumps({"machine_id": "m-test", "fault": "clear"}), machine_id=None)
+    assert m.fault is None
+
+
+def test_sensor_topic_layouts() -> None:
+    assert sensor_topic(None, None, "machine-01") == "edgesense/sensors/machine-01"
+    assert sensor_topic("acme", "lyon", "pump-07") == "es/acme/lyon/pump-07/sensors"
+    # a single tenant coordinate is enough to opt in; the other defaults
+    assert sensor_topic("acme", None, "m1") == "es/acme/default/m1/sensors"
+    assert sensor_topic(None, "lyon", "m1") == "es/default/lyon/m1/sensors"
+
+
+def test_control_filter_layouts() -> None:
+    assert control_filter(None, None) == "edgesense/control/fault"
+    assert control_filter("acme", "lyon") == "es/acme/lyon/+/control"
+
+
+def test_control_machine_id_parsing() -> None:
+    assert control_machine_id("es/acme/lyon/pump-07/control") == "pump-07"
+    assert control_machine_id("edgesense/control/fault") is None
+    assert control_machine_id("es/acme/lyon/control") is None  # too short
+    assert control_machine_id("es/a/b/m/sensors") is None  # not a control topic

@@ -1,14 +1,18 @@
 // EdgeSense edge agent.
 //
 // Subscribes to raw sensor readings on the local MQTT broker, scores each
-// reading against the inference sidecar, and publishes an event to
-// edgesense/events/<machine_id> when a reading is anomalous. Only events
-// leave the node.
+// reading against the inference sidecar, and publishes an event when a
+// reading is anomalous. Only events leave the node. The event topic is
+// edgesense/events/<machine_id> in the legacy layout, or
+// es/<org>/<site>/<machine_id>/events when tenant namespacing is enabled via
+// EDGESENSE_ORG / EDGESENSE_SITE (see topics.go and PLATFORM.md §4.4).
 //
 // Events are published to the uplink broker (EDGESENSE_UPLINK_BROKER, e.g. a
 // cloud broker over a flaky LTE link). By default the uplink is the local
-// broker. Events that cannot be published (uplink outage) are buffered on
-// disk and flushed on reconnect — no event is lost.
+// broker. Optional credentials: EDGESENSE_UPLINK_USERNAME/_PASSWORD for the
+// uplink, EDGESENSE_BROKER_USERNAME/_PASSWORD for the local broker. Events
+// that cannot be published (uplink outage) are buffered on disk and flushed
+// on reconnect — no event is lost.
 //
 // Operational state is exposed on EDGESENSE_METRICS_ADDR: Prometheus
 // metrics on /metrics, liveness on /healthz (see metrics.go).
@@ -22,7 +26,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
@@ -66,21 +69,27 @@ func envOr(key, fallback string) string {
 	return fallback
 }
 
-// topicMachineID extracts the machine id from a topic like
-// "edgesense/sensors/<machine_id>".
-func topicMachineID(topic string) string {
-	parts := strings.Split(topic, "/")
-	return parts[len(parts)-1]
-}
-
 func main() {
 	broker := envOr("EDGESENSE_BROKER", "tcp://localhost:11883")
 	uplinkBroker := envOr("EDGESENSE_UPLINK_BROKER", broker)
 	inferenceURL := envOr("EDGESENSE_INFERENCE_URL", "http://localhost:8800/score")
-	sensorTopic := envOr("EDGESENSE_SENSOR_TOPIC", "edgesense/sensors/#")
+	layout := layoutFromEnv()
+	sensorTopic := envOr("EDGESENSE_SENSOR_TOPIC", layout.defaultSensorFilter())
 	bufferPath := envOr("EDGESENSE_BUFFER", "event-buffer.jsonl")
 	metricsAddr := envOr("EDGESENSE_METRICS_ADDR", ":8890")
 	splitUplink := uplinkBroker != broker
+
+	localUser, localPass := os.Getenv("EDGESENSE_BROKER_USERNAME"), os.Getenv("EDGESENSE_BROKER_PASSWORD")
+	uplinkUser, uplinkPass := os.Getenv("EDGESENSE_UPLINK_USERNAME"), os.Getenv("EDGESENSE_UPLINK_PASSWORD")
+	if !splitUplink && localUser == "" {
+		// single-broker mode: the one shared client also publishes events,
+		// so uplink credentials apply to it
+		localUser, localPass = uplinkUser, uplinkPass
+	}
+
+	if layout.namespaced {
+		log.Printf("topic layout: namespaced es/%s/%s/<machine>/…", layout.org, layout.site)
+	}
 
 	httpClient := &http.Client{Timeout: 2 * time.Second}
 	buffer := newEventBuffer(bufferPath, bufferCapacity)
@@ -99,7 +108,7 @@ func main() {
 		if !uplinkClient.IsConnectionOpen() {
 			return fmt.Errorf("uplink not connected")
 		}
-		topic := fmt.Sprintf("edgesense/events/%s", ev.MachineID)
+		topic := layout.eventTopic(ev.MachineID)
 		tok := uplinkClient.Publish(topic, 1, false, payload)
 		if !tok.WaitTimeout(publishTimeout) {
 			return fmt.Errorf("publish timeout on %s", topic)
@@ -130,7 +139,7 @@ func main() {
 			return
 		}
 		if r.MachineID == "" {
-			r.MachineID = topicMachineID(msg.Topic())
+			r.MachineID = machineIDFromTopic(msg.Topic())
 		}
 
 		sr, err := score(httpClient, inferenceURL, r)
@@ -172,6 +181,8 @@ func main() {
 		SetClientID("edgesense-agent").
 		SetAutoReconnect(true).
 		SetOrderMatters(false).
+		SetUsername(localUser).
+		SetPassword(localPass).
 		SetOnConnectHandler(func(c mqtt.Client) {
 			if tok := c.Subscribe(sensorTopic, 0, handler); tok.Wait() && tok.Error() != nil {
 				log.Printf("subscribe failed: %v", tok.Error())
@@ -191,6 +202,8 @@ func main() {
 		uplinkOpts := mqtt.NewClientOptions().
 			AddBroker(uplinkBroker).
 			SetClientID("edgesense-agent-uplink").
+			SetUsername(uplinkUser).
+			SetPassword(uplinkPass).
 			SetAutoReconnect(true).
 			SetConnectRetry(true).
 			SetConnectRetryInterval(2 * time.Second).

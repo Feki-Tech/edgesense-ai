@@ -26,7 +26,28 @@ import paho.mqtt.client as mqtt
 BROKER = os.environ.get("EDGESENSE_BROKER_HOST", "localhost")
 PORT = int(os.environ.get("EDGESENSE_BROKER_PORT", "11883"))
 UPLINK_PORT = int(os.environ.get("EDGESENSE_UPLINK_PORT", "12883"))
-CONTROL_TOPIC = "edgesense/control/fault"
+UPLINK_USERNAME = os.environ.get("EDGESENSE_UPLINK_USERNAME")
+UPLINK_PASSWORD = os.environ.get("EDGESENSE_UPLINK_PASSWORD", "")
+
+# topic layout (PLATFORM.md §4.4): legacy flat topics by default, tenant-
+# namespaced es/<org>/<site>/… when EDGESENSE_ORG/EDGESENSE_SITE are set
+ORG = os.environ.get("EDGESENSE_ORG")
+SITE = os.environ.get("EDGESENSE_SITE")
+NAMESPACED = bool(ORG or SITE)
+PREFIX = f"es/{ORG or 'default'}/{SITE or 'default'}"
+SENSOR_FILTER = f"{PREFIX}/+/sensors/#" if NAMESPACED else "edgesense/sensors/#"
+EVENT_FILTER = f"{PREFIX}/+/events" if NAMESPACED else "edgesense/events/#"
+
+
+def control_topic(machine: str) -> str:
+    return f"{PREFIX}/{machine}/control" if NAMESPACED else "edgesense/control/fault"
+
+
+def is_reading_topic(topic: str) -> bool:
+    parts = topic.split("/")
+    if parts[0] == "es":
+        return len(parts) >= 5 and parts[4] == "sensors"
+    return len(parts) >= 2 and parts[1] == "sensors"
 
 SCENARIOS = [
     ("bearing_fault", "worn bearing → vibration 3–5×, current +10–25%"),
@@ -50,9 +71,9 @@ class Feed:
         except json.JSONDecodeError:
             return
         with self.lock:
-            if msg.topic.startswith("edgesense/sensors/"):
+            if is_reading_topic(msg.topic):
                 self.readings[payload.get("machine_id", "?")].append(payload)
-            elif msg.topic.startswith("edgesense/events/"):
+            else:  # event filters are the only other subscription
                 key = (payload.get("machine_id", "?"), payload.get("ts", 0.0))
                 if key not in self._seen:  # events may arrive on both brokers
                     self._seen.add(key)
@@ -84,8 +105,10 @@ def wait_for(predicate, timeout: float, poll: float = 0.2):
 
 
 def connect(host: str, port: int, feed: Feed, topics: list[str],
-            client_id: str) -> mqtt.Client | None:
+            client_id: str, auth: tuple[str, str] | None = None) -> mqtt.Client | None:
     client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=client_id)
+    if auth and auth[0]:
+        client.username_pw_set(auth[0], auth[1])
     client.on_message = feed.on_message
     client.on_connect = lambda c, *_: c.subscribe([(t, 0) for t in topics])
     try:
@@ -104,14 +127,15 @@ def main() -> int:
     feed = Feed()
     clients = []
     local = connect(BROKER, PORT, feed,
-                    ["edgesense/sensors/#", "edgesense/events/#"], "edgesense-demo-local")
+                    [SENSOR_FILTER, EVENT_FILTER], "edgesense-demo-local")
     if local is None:
         print(f"cannot reach broker at {BROKER}:{PORT} — is the stack up? (make stack)")
         return 1
     clients.append(local)
     if UPLINK_PORT != PORT:
         uplink = connect(BROKER, UPLINK_PORT, feed,
-                         ["edgesense/events/#"], "edgesense-demo-uplink")
+                         [EVENT_FILTER], "edgesense-demo-uplink",
+                         auth=(UPLINK_USERNAME, UPLINK_PASSWORD))
         if uplink:
             clients.append(uplink)
 
@@ -132,7 +156,7 @@ def main() -> int:
         print(f"\n--- scenario {i}/{len(SCENARIOS)}: {fault} on {machine} ---")
         print(f"    {blurb}")
         base = len(feed.machine_readings(machine))
-        local.publish(CONTROL_TOPIC, json.dumps(
+        local.publish(control_topic(machine), json.dumps(
             {"machine_id": machine, "fault": fault, "ticks": args.ticks}))
 
         def fault_bounds():

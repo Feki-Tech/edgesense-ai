@@ -8,19 +8,6 @@ import (
 	"time"
 )
 
-func TestTopicMachineID(t *testing.T) {
-	cases := map[string]string{
-		"edgesense/sensors/machine-01": "machine-01",
-		"edgesense/sensors/a/b":        "b",
-		"bare":                         "bare",
-	}
-	for topic, want := range cases {
-		if got := topicMachineID(topic); got != want {
-			t.Errorf("topicMachineID(%q) = %q, want %q", topic, got, want)
-		}
-	}
-}
-
 func TestScoreOK(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var body map[string]float64
