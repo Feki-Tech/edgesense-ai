@@ -2,7 +2,7 @@ VENV := .venv
 PY := $(VENV)/bin/python
 MACHINES ?= 10
 
-.PHONY: setup deps broker broker-down train export-onnx inference agent simulate dashboard smoke test snap stack stack-down stack-logs demo demo-offline eval benchmark fleet
+.PHONY: setup deps broker broker-down train export-onnx inference agent simulate dashboard smoke test snap stack stack-down stack-logs stack-secure stack-secure-down check-acl demo demo-offline eval benchmark fleet
 
 stack:
 	docker compose up -d --build
@@ -12,6 +12,15 @@ stack-down:
 
 stack-logs:
 	docker compose logs -f --tail 50
+
+stack-secure:    ## namespaced topics + authenticated uplink broker (opt-in, see README)
+	docker compose -f docker-compose.yml -f docker-compose.secure.yml up -d --build
+
+stack-secure-down:
+	docker compose -f docker-compose.yml -f docker-compose.secure.yml down
+
+check-acl:       ## prove per-device isolation on the secured uplink (needs stack-secure)
+	$(PY) scripts/check_acl.py
 
 demo:            ## live fault-injection demo against the running stack
 	$(PY) scripts/demo.py
