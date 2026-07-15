@@ -100,6 +100,27 @@ services:
       - mosquitto-cloud
     restart: unless-stopped
 
+  mcp-server:
+    build: ./mcp_server
+    container_name: edgesense-mcp
+    ports:
+      - "8900:8900"
+    environment:
+      EDGESENSE_BROKER_HOST: mosquitto
+      EDGESENSE_BROKER_PORT: "1883"
+      EDGESENSE_UPLINK_HOST: mosquitto-cloud
+      EDGESENSE_UPLINK_PORT: "1883"
+      EDGESENSE_INFERENCE_URL: http://inference:8800
+      EDGESENSE_PROMETHEUS_URL: http://prometheus:9090
+    depends_on:
+      mosquitto:
+        condition: service_started
+      mosquitto-cloud:
+        condition: service_started
+      inference:
+        condition: service_healthy
+    restart: unless-stopped
+
   prometheus:
     image: prom/prometheus:v2.53.0
     container_name: edgesense-prometheus

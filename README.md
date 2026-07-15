@@ -71,7 +71,7 @@ make stack-down   # stop everything (either variant)
 
 - Dashboard: http://localhost:8501 · Grafana: http://localhost:3000 (no login)
 - Inference API: http://localhost:8800/healthz · Agent health/metrics: http://localhost:8890/healthz
-- Prometheus: http://localhost:9090
+- Prometheus: http://localhost:9090 · MCP server (streamable HTTP): http://localhost:8900/mcp
 - Local broker (sensors): localhost:11883 · Cloud broker (events): localhost:12883
 - With `make stack-coap`: CoAP receiver on udp/15683, its metrics on http://localhost:8891/healthz
 
@@ -179,6 +179,7 @@ offline test with synthetic data, so CI never touches the network.
 | `edge-agent/`| Go agent: subscribes to sensor topics, scores each reading, publishes anomaly events to the uplink (MQTT by default, CoAP optional) with store-and-forward buffering. |
 | `coap-receiver/` | Go CoAP→MQTT bridge for the constrained-link uplink: accepts CoAP POSTs of events and republishes them to the cloud broker (compose profile `coap`). |
 | `dashboard/` | Streamlit live dashboard: signals, anomaly markers, event feed.    |
+| `mcp_server/`| MCP (Model Context Protocol) server exposing the stack as tools for AI assistants/agents. |
 | `scripts/`   | Self-verifying demos (`demo.py`, `demo_offline.py`) and smoke test. |
 | `deploy/`    | Mosquitto config, Prometheus scrape config, Grafana provisioning (datasource + fleet dashboard). |
 | `snap/`      | Snapcraft packaging for the edge agent (Ubuntu Core ready).        |
@@ -340,6 +341,43 @@ with an auto-provisioned **EdgeSense AI — fleet & agent** dashboard
 reading/anomaly rates, and p50/p95 inference latency. `make demo-offline`
 asserts against these metrics — the buffer-depth gauge must drain to zero
 after the replay.
+
+## MCP server
+
+`mcp_server/` exposes the stack to MCP (Model Context Protocol) clients —
+Claude Desktop, IDE assistants, agent frameworks — so an AI assistant can
+poke the fleet directly:
+
+| Tool | Backed by |
+|---|---|
+| `score_reading(vibration, temperature, current)` | inference `POST /score` |
+| `get_inference_health()` | inference `GET /healthz` |
+| `inject_fault(machine_id, fault, ticks)` | MQTT `edgesense/control/fault` (same payload as the demos) |
+| `list_recent_events(limit, machine_id)` | MQTT `edgesense/events/#` on the uplink broker |
+| `get_fleet_metrics()` | Prometheus (readings/s, anomaly rate, buffer depth, uplink status) |
+
+Run on stdio for local MCP clients (`make mcp`), or as part of the Docker
+stack, where it serves streamable HTTP on http://localhost:8900/mcp
+(`make stack` starts it automatically). Brokers, inference and Prometheus
+are resolved via the same `EDGESENSE_*` env vars and defaults as the other
+host-side tooling (see `mcp_server/server.py`).
+
+Example client config (stdio):
+
+```json
+{
+  "mcpServers": {
+    "edgesense": {
+      "command": "/path/to/edgesense-ai/.venv/bin/python",
+      "args": ["/path/to/edgesense-ai/mcp_server/server.py"]
+    }
+  }
+}
+```
+
+Ask the assistant to *"inject an overheat on machine-02 and tell me when the
+alarm fires"* — it publishes the fault, tails `list_recent_events` and reads
+`get_fleet_metrics` while the dashboard shows the episode live.
 
 ## ONNX export
 

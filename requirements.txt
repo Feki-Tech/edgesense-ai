@@ -9,3 +9,4 @@ streamlit
 streamlit-autorefresh
 plotly
 requests
+mcp>=1.8
