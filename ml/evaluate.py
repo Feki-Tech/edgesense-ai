@@ -148,8 +148,9 @@ def to_markdown(results: dict, meta: dict) -> str:
         f" ({READING_INTERVAL_S}s apart at the simulator's default rate).",
         "- *reading recall* is per-reading; early-episode readings can be subtle, so"
         " recall < 100% while every episode is still caught.",
-        "- *trigger reasons*: `model` = IsolationForest, `limit` = z-score guard"
-        " (> 6σ on a single feature), `model+limit` = both agreed.",
+        "- *trigger reasons*: `model` = autoencoder (reconstruction error above its"
+        " calibrated threshold), `limit` = z-score guard (> 6σ on a single feature),"
+        " `model+limit` = both agreed.",
     ]
     return "\n".join(lines) + "\n"
 
@@ -174,7 +175,7 @@ def main() -> int:
     print(md)
     if args.out:
         Path(args.out).parent.mkdir(parents=True, exist_ok=True)
-        Path(args.out).write_text(md)
+        Path(args.out).write_text(md, encoding="utf-8")
         print(f"(written to {args.out})", file=sys.stderr)
     return 0
 
