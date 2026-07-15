@@ -1,0 +1,5 @@
+# Optional: PyTorch training backend (ml/train.py --backend torch).
+# CPU wheels keep the download small:
+#   pip install -r requirements-torch.txt --index-url https://download.pytorch.org/whl/cpu
+# CUDA builds (optional, faster local training): https://pytorch.org/get-started/locally/
+torch
