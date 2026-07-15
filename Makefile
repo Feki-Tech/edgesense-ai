@@ -38,8 +38,12 @@ setup:
 	python3 -m venv $(VENV)
 	$(PY) -m pip install --upgrade pip
 	$(PY) -m pip install -r requirements-dev.txt
-	cd edge-agent && go mod tidy
-	cd coap-receiver && go mod tidy
+	if command -v go >/dev/null 2>&1; then \
+		cd edge-agent && go mod tidy; \
+		cd ../coap-receiver && go mod tidy; \
+	else \
+		echo 'go not found — skipping Go deps (edge-agent, coap-receiver; only needed for `make agent` / `make test`); install Go 1.22+ e.g. `sudo apt install golang-go`'; \
+	fi
 
 broker:
 	docker compose up -d mosquitto
