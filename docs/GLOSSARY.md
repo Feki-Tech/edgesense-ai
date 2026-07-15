@@ -8,7 +8,8 @@ code (file references given). Terms introduced by the platform design are marked
 Groups: [Domain & telemetry](#domain--telemetry) ·
 [Detection](#detection) ·
 [Transport & reliability](#transport--reliability) ·
-[Platform & identity](#platform--identity)
+[Platform & identity](#platform--identity) ·
+[Hardware](#hardware)
 
 ---
 
@@ -215,3 +216,73 @@ sides authenticate cryptographically. Phase 3 device identity: the uplink listen
 requires client certs, the certificate CN (= `device_uid`) becomes the broker username,
 rotation is EST-style renewal of short-lived certs, revocation is registry-driven
 disable plus short lifetimes.
+
+---
+
+## Hardware
+
+*Terms introduced by the hardware chapter ([`HARDWARE.md`](HARDWARE.md)), which replaces
+the simulator with real sensors. Today all sensing is simulated (`simulator/simulate.py`);
+components below marked **(proposed)** do not exist in the repo.*
+
+**MEMS accelerometer** — a micro-electro-mechanical vibration sensor on a chip
+(ADXL355 class): digital output (SPI/I2C), low cost, kHz-range bandwidth. The dev/pilot
+choice for producing the `vibration` feature (`HARDWARE.md` §3.1).
+
+**IEPE** — Integrated Electronics Piezo-Electric, the industrial accelerometer standard:
+a piezo sensor with built-in charge amplifier powered by a constant-current supply over
+its coax cable. Widest bandwidth and the reference-grade option for vibration
+(`HARDWARE.md` §3.1).
+
+**RTD / PT100** — Resistance Temperature Detector: a platinum resistor (100 Ω at 0 °C
+for PT100) whose resistance varies precisely with temperature; read by a converter such
+as the MAX31865. The default source of the `temperature` feature, ring-lug-mounted on a
+bearing housing (`HARDWARE.md` §3.2).
+
+**CT clamp (current transformer)** — a split-core transformer clipped *around* one
+conductor that outputs a scaled, galvanically isolated image of the AC current — the
+source of the `current` feature. Mains-side installation is qualified-electrician work
+(`HARDWARE.md` §3.3).
+
+**IO-Link** — a point-to-point industrial sensor protocol (IEC 61131-9): smart sensors
+plug into an IO-Link master and report calibrated digital values. IO-Link vibration
+transmitters (IFM VVB class) output mm/s RMS directly — the closest physical match to
+the reading schema (`HARDWARE.md` §3.4).
+
+**Modbus** — a simple, ubiquitous industrial register-polling protocol (RTU over RS-485,
+or TCP). How the adapter reads power meters (SDM class) for `current`, and existing
+machine electronics where available (`HARDWARE.md` §3.3–3.4).
+
+**OPC UA** — the machine-to-IT interoperability standard for industrial equipment; PLCs
+and VFDs expose telemetry over it. Where a machine already publishes usable signals, the
+adapter polls OPC UA instead of adding physical sensors (`HARDWARE.md` §3.4).
+
+**DIN rail** — the standardized 35 mm mounting rail inside electrical cabinets.
+"DIN-rail gateway/PSU" = designed to snap into a cabinet next to existing gear — the
+form factor for Tier B edge nodes (`HARDWARE.md` §2, §5.2).
+
+**PoE (Power over Ethernet)** — powering a device over its network cable (802.3af/at).
+One-cable installs for edge nodes: RPi via PoE+ HAT, some industrial gateways natively
+(`HARDWARE.md` §5.1).
+
+**Signal conditioning** — everything between transducer and digital value: filtering,
+amplification, anti-aliasing, integration (acceleration → velocity), analog-to-digital
+conversion. For vibration it is the step that turns kHz raw samples into the schema's
+single mm/s RMS number (`HARDWARE.md` §4.1).
+
+**RMS window** — the feature-extraction step behind the 2 Hz contract: root-mean-square
+of a high-rate signal over one 0.5 s reporting tick, published as the reading's value.
+`vibration` is RMS of kHz-sampled velocity; `current` is RMS over whole mains cycles.
+Matches the simulator's units (mm/s RMS, A) so trained models transfer
+(`HARDWARE.md` §4.1–4.2).
+
+**Sensor adapter** ***(proposed)*** — the per-node component that replaces the
+simulator: reads sensor drivers (I2C/SPI/UART/Modbus/IO-Link), computes window features,
+and publishes schema-conformant JSON readings to `edgesense/sensors/<machine_id>` at
+~2 Hz. Fills exactly the simulator's role; the rest of the stack cannot tell the
+difference (`HARDWARE.md` §4.3).
+
+**EMI (electromagnetic interference)** — electrical noise coupling into sensor signals,
+dominated on plant floors by VFD output cabling. Countered by cable separation, shielded
+twisted pair grounded at one end, and preferring digital-at-the-sensor interfaces over
+long analog runs (`HARDWARE.md` §5.3).
