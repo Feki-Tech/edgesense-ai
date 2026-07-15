@@ -2,13 +2,16 @@ VENV := .venv
 PY := $(VENV)/bin/python
 MACHINES ?= 10
 
-.PHONY: setup deps broker broker-down train export-onnx inference agent simulate dashboard smoke test snap stack stack-down stack-logs demo demo-offline eval benchmark fleet
+.PHONY: setup deps broker broker-down train export-onnx inference agent simulate dashboard smoke test snap stack stack-down stack-logs stack-coap demo demo-offline demo-offline-coap eval benchmark fleet
 
 stack:
 	docker compose up -d --build
 
+stack-coap:      ## stack with the CoAP uplink: agent -> coap-receiver -> cloud broker
+	EDGESENSE_UPLINK_URL=coap://coap-receiver:5683 docker compose --profile coap up -d --build
+
 stack-down:
-	docker compose down
+	docker compose --profile coap down
 
 stack-logs:
 	docker compose logs -f --tail 50
@@ -18,6 +21,9 @@ demo:            ## live fault-injection demo against the running stack
 
 demo-offline:    ## uplink-outage / store-and-forward demo (stops+restarts cloud broker)
 	$(PY) scripts/demo_offline.py
+
+demo-offline-coap: ## same outage demo for the CoAP stack (stops+restarts the receiver)
+	EDGESENSE_CLOUD_CONTAINER=edgesense-coap-receiver $(PY) scripts/demo_offline.py
 
 eval:            ## offline model evaluation -> docs/EVALUATION.md
 	$(PY) ml/evaluate.py --out docs/EVALUATION.md
@@ -33,6 +39,7 @@ setup:
 	$(PY) -m pip install --upgrade pip
 	$(PY) -m pip install -r requirements-dev.txt
 	cd edge-agent && go mod tidy
+	cd coap-receiver && go mod tidy
 
 broker:
 	docker compose up -d mosquitto
@@ -64,6 +71,7 @@ smoke:
 test:
 	$(PY) -m pytest
 	cd edge-agent && go test ./...
+	cd coap-receiver && go test ./...
 
 snap:
 	snapcraft pack --verbosity=brief
