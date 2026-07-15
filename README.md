@@ -5,19 +5,29 @@ sensors at the edge, ML inference on the node, and only *events* go upstream —
 even when the uplink is down.
 
 ```
-┌───────────┐ sensors  ┌────────────┐ /score  ┌────────────┐
-│ simulator │ ───────► │ edge-agent │ ──────► │ inference  │
-│ 3 machines│   MQTT   │    (Go)    │ ◄────── │ (FastAPI + │
-└───────────┘  (local  │ disk buffer│   HTTP  │  autoenc.) │
-      ▲        broker) └─────┬──────┘         └────────────┘
-      │                      │ anomaly events only · QoS 1
-      │ edgesense/control/   │ store-and-forward uplink
-      │ fault (demos)        ▼
+┌─ EDGE DEVICE (one per machine) ─────────────────────────────────┐
+│ ┌───────────┐ sensors  ┌────────────┐ /score  ┌────────────┐    │
+│ │ simulator │ ───────► │ edge-agent │ ──────► │ inference  │    │
+│ │ 3 machines│   MQTT   │    (Go)    │ ◄────── │ (FastAPI + │    │
+│ └───────────┘  (local  │ disk buffer│   HTTP  │  autoenc.) │    │
+│       ▲        broker) └─────┬──────┘         └────────────┘    │
+│       │ edgesense/control/   │ raw readings stay on the node    │
+│       │ fault (demos)        │ (~50 MB/day/machine)             │
+└──────────────────────────────┼──────────────────────────────────┘
+                               │ anomaly events only · QoS 1
+                               │ store-and-forward uplink
+                               ▼                CLOUD / UPSTREAM
                       ┌──────────────┐       ┌────────────┐
                       │ cloud broker │ ────► │ dashboard  │
                       └──────────────┘       └────────────┘
    agent /metrics ──► Prometheus ──► Grafana (provisioned dashboard)
 ```
+
+Everything inside the box lives on the edge device: the local broker, the
+scoring loop and the disk buffer (in production one node per machine — the
+snap packages exactly this; the Docker demo runs the same pieces as
+containers on one host, with the simulator standing in for real sensors).
+Only anomaly events and Prometheus scrapes cross the boundary.
 
 ## Use cases
 
