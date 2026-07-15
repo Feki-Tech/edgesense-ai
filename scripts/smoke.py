@@ -19,8 +19,21 @@ import requests
 BROKER = os.environ.get("EDGESENSE_BROKER_HOST", "localhost")
 PORT = int(os.environ.get("EDGESENSE_BROKER_PORT", "11883"))
 UPLINK_PORT = int(os.environ.get("EDGESENSE_UPLINK_PORT", "12883"))
+UPLINK_USERNAME = os.environ.get("EDGESENSE_UPLINK_USERNAME")
+UPLINK_PASSWORD = os.environ.get("EDGESENSE_UPLINK_PASSWORD", "")
 INFERENCE = "http://localhost:8800"
 MACHINE = "machine-smoke"
+
+# topic layout (PLATFORM.md §4.4): legacy flat topics by default, tenant-
+# namespaced es/<org>/<site>/… when EDGESENSE_ORG/EDGESENSE_SITE are set
+ORG = os.environ.get("EDGESENSE_ORG")
+SITE = os.environ.get("EDGESENSE_SITE")
+NAMESPACED = bool(ORG or SITE)
+PREFIX = f"es/{ORG or 'default'}/{SITE or 'default'}"
+SENSOR_TOPIC = (f"{PREFIX}/{MACHINE}/sensors" if NAMESPACED
+                else f"edgesense/sensors/{MACHINE}")
+EVENT_TOPIC = (f"{PREFIX}/{MACHINE}/events" if NAMESPACED
+               else f"edgesense/events/{MACHINE}")
 
 HEALTHY = {"machine_id": MACHINE, "ts": time.time(),
            "vibration": 0.8, "temperature": 45.0, "current": 12.0}
@@ -48,12 +61,14 @@ def main() -> int:
     for i, port in enumerate(dict.fromkeys((UPLINK_PORT, PORT))):
         listener = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2,
                                client_id=f"edgesense-smoke-sub-{i}")
+        if port == UPLINK_PORT and UPLINK_USERNAME:
+            listener.username_pw_set(UPLINK_USERNAME, UPLINK_PASSWORD)
         listener.on_message = on_message
         try:
             listener.connect(BROKER, port)
         except OSError:
             continue  # that broker isn't running in this setup
-        listener.subscribe(f"edgesense/events/{MACHINE}")
+        listener.subscribe(EVENT_TOPIC)
         listener.loop_start()
         listeners.append(listener)
 
@@ -66,8 +81,8 @@ def main() -> int:
     pub.loop_start()
     time.sleep(0.5)
 
-    pub.publish(f"edgesense/sensors/{MACHINE}", json.dumps(HEALTHY))
-    pub.publish(f"edgesense/sensors/{MACHINE}", json.dumps(FAULTY))
+    pub.publish(SENSOR_TOPIC, json.dumps(HEALTHY))
+    pub.publish(SENSOR_TOPIC, json.dumps(FAULTY))
 
     deadline = time.time() + 10
     while time.time() < deadline and not events:

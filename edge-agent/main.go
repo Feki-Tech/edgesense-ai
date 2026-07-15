@@ -1,14 +1,18 @@
 // EdgeSense edge agent.
 //
 // Subscribes to raw sensor readings on the local MQTT broker, scores each
-// reading against the inference sidecar, and publishes an event to
-// edgesense/events/<machine_id> when a reading is anomalous. Only events
-// leave the node.
+// reading against the inference sidecar, and publishes an event when a
+// reading is anomalous. Only events leave the node. The event topic is
+// edgesense/events/<machine_id> in the legacy layout, or
+// es/<org>/<site>/<machine_id>/events when tenant namespacing is enabled via
+// EDGESENSE_ORG / EDGESENSE_SITE (see topics.go and PLATFORM.md §4.4).
 //
 // Events leave through a pluggable uplink transport selected by
 // EDGESENSE_UPLINK_URL (uplink.go): MQTT by default (EDGESENSE_UPLINK_BROKER,
 // e.g. a cloud broker over a flaky LTE link; defaults to the local broker),
-// or CoAP/UDP (coap://host:port, see coap.go) for constrained links. Events
+// or CoAP/UDP (coap://host:port, see coap.go) for constrained links. Optional
+// MQTT credentials: EDGESENSE_UPLINK_USERNAME/_PASSWORD for the uplink,
+// EDGESENSE_BROKER_USERNAME/_PASSWORD for the local broker. Events
 // that cannot be published (uplink outage) are buffered on disk and flushed
 // on reconnect — no event is lost.
 //
@@ -24,7 +28,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
@@ -68,21 +71,27 @@ func envOr(key, fallback string) string {
 	return fallback
 }
 
-// topicMachineID extracts the machine id from a topic like
-// "edgesense/sensors/<machine_id>".
-func topicMachineID(topic string) string {
-	parts := strings.Split(topic, "/")
-	return parts[len(parts)-1]
-}
-
 func main() {
 	broker := envOr("EDGESENSE_BROKER", "tcp://localhost:11883")
 	uplinkURL := envOr("EDGESENSE_UPLINK_URL", envOr("EDGESENSE_UPLINK_BROKER", broker))
 	inferenceURL := envOr("EDGESENSE_INFERENCE_URL", "http://localhost:8800/score")
-	sensorTopic := envOr("EDGESENSE_SENSOR_TOPIC", "edgesense/sensors/#")
+	layout := layoutFromEnv()
+	sensorTopic := envOr("EDGESENSE_SENSOR_TOPIC", layout.defaultSensorFilter())
 	bufferPath := envOr("EDGESENSE_BUFFER", "event-buffer.jsonl")
 	metricsAddr := envOr("EDGESENSE_METRICS_ADDR", ":8890")
 	splitUplink := uplinkURL != broker
+
+	localUser, localPass := os.Getenv("EDGESENSE_BROKER_USERNAME"), os.Getenv("EDGESENSE_BROKER_PASSWORD")
+	uplinkUser, uplinkPass := os.Getenv("EDGESENSE_UPLINK_USERNAME"), os.Getenv("EDGESENSE_UPLINK_PASSWORD")
+	if !splitUplink && localUser == "" {
+		// single-broker mode: the one shared client also publishes events,
+		// so uplink credentials apply to it
+		localUser, localPass = uplinkUser, uplinkPass
+	}
+
+	if layout.namespaced {
+		log.Printf("topic layout: namespaced es/%s/%s/<machine>/…", layout.org, layout.site)
+	}
 
 	httpClient := &http.Client{Timeout: 2 * time.Second}
 	buffer := newEventBuffer(bufferPath, bufferCapacity)
@@ -118,7 +127,7 @@ func main() {
 			return
 		}
 		if r.MachineID == "" {
-			r.MachineID = topicMachineID(msg.Topic())
+			r.MachineID = machineIDFromTopic(msg.Topic())
 		}
 
 		sr, err := score(httpClient, inferenceURL, r)
@@ -160,6 +169,8 @@ func main() {
 		SetClientID("edgesense-agent").
 		SetAutoReconnect(true).
 		SetOrderMatters(false).
+		SetUsername(localUser).
+		SetPassword(localPass).
 		SetOnConnectHandler(func(c mqtt.Client) {
 			if tok := c.Subscribe(sensorTopic, 0, handler); tok.Wait() && tok.Error() != nil {
 				log.Printf("subscribe failed: %v", tok.Error())
@@ -177,12 +188,13 @@ func main() {
 
 	if splitUplink {
 		var err error
-		uplink, err = newUplinkTransport(uplinkURL, func() { flush("uplink reconnect") })
+		uplink, err = newUplinkTransport(uplinkURL, func() { flush("uplink reconnect") },
+			uplinkOptions{layout: layout, username: uplinkUser, password: uplinkPass})
 		if err != nil {
 			log.Fatalf("uplink: %v", err)
 		}
 	} else {
-		uplink = sharedMQTTUplink(localClient)
+		uplink = sharedMQTTUplink(localClient, layout)
 	}
 
 	serveMetrics(metricsAddr, func() map[string]any {

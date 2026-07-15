@@ -1,13 +1,19 @@
 """Machine sensor simulator.
 
 Publishes vibration / temperature / current readings for N virtual machines
-to MQTT (topic: edgesense/sensors/<machine_id>). Occasionally injects fault
-episodes so the anomaly detector has something to find.
+to MQTT. Occasionally injects fault episodes so the anomaly detector has
+something to find.
 
-Faults can also be injected on demand (for demos and testing) by publishing
-a JSON command to `edgesense/control/fault`:
+Topics depend on the layout (PLATFORM.md §4.4). Legacy (default):
+readings on `edgesense/sensors/<machine_id>`, fault injection via a JSON
+command on the global control topic `edgesense/control/fault`:
 
     {"machine_id": "machine-01", "fault": "bearing_fault", "ticks": 24}
+
+With --org/--site (or EDGESENSE_ORG/EDGESENSE_SITE) set, the tenant-namespaced
+layout is used instead: readings on `es/<org>/<site>/<machine_id>/sensors`,
+commands (same JSON, machine_id taken from the topic) on the per-machine
+topic `es/<org>/<site>/<machine_id>/control`.
 
 `fault` is one of bearing_fault / overheat / overload, or "clear" to end the
 current episode immediately.
@@ -17,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import queue
 import random
 import signal
@@ -28,6 +35,29 @@ import paho.mqtt.client as mqtt
 
 FAULT_TYPES = ("bearing_fault", "overheat", "overload")
 CONTROL_TOPIC = "edgesense/control/fault"
+
+
+def sensor_topic(org: str | None, site: str | None, machine_id: str) -> str:
+    """Reading topic for one machine: namespaced when org/site set, else legacy."""
+    if org or site:
+        return f"es/{org or 'default'}/{site or 'default'}/{machine_id}/sensors"
+    return f"edgesense/sensors/{machine_id}"
+
+
+def control_filter(org: str | None, site: str | None) -> str:
+    """Subscription covering the control topics of every simulated machine."""
+    if org or site:
+        return f"es/{org or 'default'}/{site or 'default'}/+/control"
+    return CONTROL_TOPIC
+
+
+def control_machine_id(topic: str) -> str | None:
+    """Machine addressed by a per-machine control topic (None for the legacy
+    global topic, where the target comes from the payload instead)."""
+    parts = topic.split("/")
+    if parts[0] == "es" and len(parts) >= 5 and parts[-1] == "control":
+        return parts[3]
+    return None
 
 
 @dataclass
@@ -86,17 +116,24 @@ class Machine:
         }
 
 
-def apply_control(machines: dict[str, Machine], payload: bytes | str) -> str:
-    """Apply one control command to the fleet. Returns a log line."""
+def apply_control(machines: dict[str, Machine], payload: bytes | str,
+                  machine_id: str | None = None) -> str:
+    """Apply one control command to the fleet. Returns a log line.
+
+    `machine_id` is the machine addressed by a per-machine control topic; it
+    takes precedence over the payload's machine_id (the topic is what broker
+    ACLs scope). None means the legacy global topic.
+    """
     try:
         cmd = json.loads(payload)
     except (json.JSONDecodeError, UnicodeDecodeError):
         return "control: ignored (bad JSON)"
     if not isinstance(cmd, dict):
         return "control: ignored (bad JSON)"
-    machine = machines.get(cmd.get("machine_id", ""))
+    target = machine_id or cmd.get("machine_id", "")
+    machine = machines.get(target)
     if machine is None:
-        return f"control: ignored (unknown machine {cmd.get('machine_id')!r})"
+        return f"control: ignored (unknown machine {target!r})"
     fault = cmd.get("fault")
     if fault == "clear":
         machine.fault, machine.fault_ticks_left = None, 0
@@ -115,20 +152,26 @@ def main() -> int:
     ap.add_argument("--interval", type=float, default=0.5, help="seconds between readings")
     ap.add_argument("--anomaly-prob", type=float, default=0.01,
                     help="per-tick probability a machine starts a fault episode")
+    ap.add_argument("--org", default=os.environ.get("EDGESENSE_ORG"),
+                    help="tenant org — enables the namespaced topic layout")
+    ap.add_argument("--site", default=os.environ.get("EDGESENSE_SITE"),
+                    help="tenant site — enables the namespaced topic layout")
     args = ap.parse_args()
 
     machines = {f"machine-{i:02d}": Machine(machine_id=f"machine-{i:02d}")
                 for i in range(1, args.machines + 1)}
-    control_q: queue.Queue[bytes] = queue.Queue()
+    topics = {mid: sensor_topic(args.org, args.site, mid) for mid in machines}
+    ctl_filter = control_filter(args.org, args.site)
+    control_q: queue.Queue[tuple[str, bytes]] = queue.Queue()
 
     client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="edgesense-simulator")
-    client.on_connect = lambda c, *_: c.subscribe(CONTROL_TOPIC)
-    client.on_message = lambda _c, _u, msg: control_q.put(msg.payload)
+    client.on_connect = lambda c, *_: c.subscribe(ctl_filter)
+    client.on_message = lambda _c, _u, msg: control_q.put((msg.topic, msg.payload))
     client.connect(args.broker, args.port)
     client.loop_start()
 
     print(f"simulating {len(machines)} machines -> mqtt://{args.broker}:{args.port} "
-          f"(control: {CONTROL_TOPIC})", flush=True)
+          f"(control: {ctl_filter})", flush=True)
 
     running = True
 
@@ -141,10 +184,11 @@ def main() -> int:
 
     while running:
         while not control_q.empty():
-            print(apply_control(machines, control_q.get_nowait()), flush=True)
+            topic, payload = control_q.get_nowait()
+            print(apply_control(machines, payload, control_machine_id(topic)), flush=True)
         for m in machines.values():
             reading = m.step(args.anomaly_prob)
-            client.publish(f"edgesense/sensors/{m.machine_id}", json.dumps(reading))
+            client.publish(topics[m.machine_id], json.dumps(reading))
         time.sleep(args.interval)
 
     client.loop_stop()

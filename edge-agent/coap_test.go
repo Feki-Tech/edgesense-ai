@@ -133,7 +133,7 @@ func waitUntil(t *testing.T, timeout time.Duration, what string, cond func() boo
 }
 
 func TestNewUplinkTransportSchemeDispatch(t *testing.T) {
-	tr, err := newUplinkTransport("coap://receiver.example:5683", nil)
+	tr, err := newUplinkTransport("coap://receiver.example:5683", nil, uplinkOptions{})
 	if err != nil {
 		t.Fatalf("coap dispatch: %v", err)
 	}
@@ -145,7 +145,7 @@ func TestNewUplinkTransportSchemeDispatch(t *testing.T) {
 		t.Errorf("addr = %q", cu.addr)
 	}
 
-	tr, err = newUplinkTransport("coap://receiver.example", nil)
+	tr, err = newUplinkTransport("coap://receiver.example", nil, uplinkOptions{})
 	if err != nil {
 		t.Fatalf("coap default port: %v", err)
 	}
@@ -153,7 +153,7 @@ func TestNewUplinkTransportSchemeDispatch(t *testing.T) {
 		t.Errorf("default port addr = %q, want receiver.example:5683", got)
 	}
 
-	tr, err = newUplinkTransport("tcp://localhost:1883", nil)
+	tr, err = newUplinkTransport("tcp://localhost:1883", nil, uplinkOptions{})
 	if err != nil {
 		t.Fatalf("tcp dispatch: %v", err)
 	}
@@ -161,10 +161,10 @@ func TestNewUplinkTransportSchemeDispatch(t *testing.T) {
 		t.Fatalf("tcp:// gave %T, want *mqttUplink", tr)
 	}
 
-	if _, err := newUplinkTransport("coaps://receiver:5684", nil); err == nil {
+	if _, err := newUplinkTransport("coaps://receiver:5684", nil, uplinkOptions{}); err == nil {
 		t.Error("coaps:// should be rejected (DTLS unsupported)")
 	}
-	if _, err := newUplinkTransport("coap://", nil); err == nil {
+	if _, err := newUplinkTransport("coap://", nil, uplinkOptions{}); err == nil {
 		t.Error("coap:// without host should be rejected")
 	}
 }
@@ -172,7 +172,7 @@ func TestNewUplinkTransportSchemeDispatch(t *testing.T) {
 func TestMQTTUplinkGatesOnConnection(t *testing.T) {
 	// A never-connected paho client: the gate must fail fast so events go to
 	// the disk buffer instead of paho's internal reconnect queue.
-	m := sharedMQTTUplink(mqtt.NewClient(mqtt.NewClientOptions().AddBroker("tcp://127.0.0.1:1")))
+	m := sharedMQTTUplink(mqtt.NewClient(mqtt.NewClientOptions().AddBroker("tcp://127.0.0.1:1")), topicLayout{})
 	if m.Connected() {
 		t.Fatal("disconnected client reported Connected")
 	}
