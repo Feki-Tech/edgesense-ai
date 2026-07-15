@@ -6,3 +6,9 @@ scrape_configs:
   - job_name: edgesense-agent
     static_configs:
       - targets: ["agent:8890"]
+
+  # Only live when the stack runs with the CoAP uplink profile
+  # (make stack-coap); otherwise the target simply reports down.
+  - job_name: edgesense-coap-receiver
+    static_configs:
+      - targets: ["coap-receiver:8891"]
