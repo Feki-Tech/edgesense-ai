@@ -1,4 +1,4 @@
-module edgesense/agent
+module edgesense/coap-receiver
 
 go 1.22
 
