@@ -2,7 +2,7 @@ VENV := .venv
 PY := $(VENV)/bin/python
 MACHINES ?= 10
 
-.PHONY: setup deps broker broker-down train export-onnx inference agent simulate dashboard smoke test snap stack stack-down stack-logs stack-coap demo demo-offline demo-offline-coap eval benchmark fleet
+.PHONY: setup deps broker broker-down train export-onnx inference agent simulate dashboard mcp smoke test snap stack stack-down stack-logs stack-coap demo demo-offline demo-offline-coap eval benchmark fleet
 
 stack:
 	docker compose up -d --build
@@ -68,6 +68,9 @@ simulate:
 
 dashboard:
 	$(VENV)/bin/streamlit run dashboard/app.py
+
+mcp:             ## MCP server on stdio (for local MCP clients)
+	$(PY) mcp_server/server.py
 
 smoke:
 	$(PY) scripts/smoke.py
