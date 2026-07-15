@@ -166,6 +166,13 @@ an internal network with two brokers: `mosquitto` (local sensor bus) and
 
 ## Quickstart (local processes)
 
+Prerequisites:
+
+- Python 3.12+
+- Docker (for the brokers / full stack)
+- Go 1.22+ — only for running the agent locally (`make agent`, `make test`); `make setup` skips the Go deps with a warning if Go is missing
+- `mosquitto-clients` (optional, for manual fault injection)
+
 ```bash
 make setup        # venv + python deps (incl. dev) + go deps
 make broker       # start mosquitto (docker)
