@@ -180,6 +180,13 @@ an internal network with two brokers: `mosquitto` (local sensor bus) and
 
 ## Quickstart (local processes)
 
+Prerequisites:
+
+- Python 3.12+
+- Docker (for the brokers / full stack)
+- Go 1.22+ — only for running the agent locally (`make agent`, `make test`); `make setup` skips the Go deps with a warning if Go is missing
+- `mosquitto-clients` (optional, for manual fault injection)
+
 ```bash
 make setup        # venv + python deps (incl. dev) + go deps
 make broker       # start mosquitto (docker)
@@ -380,6 +387,14 @@ CoAP receiver (profile `coap`) **udp/15683**, its metrics on **8891**.
 - [x] CoAP uplink for constrained/LTE links
 - [ ] Alerting: Grafana alert rules on buffer depth / uplink downtime
 - [ ] Inference service as a second snap; model updates as snap refreshes
+
+## Platform vision
+
+[`docs/PLATFORM.md`](docs/PLATFORM.md) is the design document for growing this demo into
+a multi-user platform — tenancy (org → site → machine), RBAC, per-device identity
+(broker ACLs → mTLS), namespaced topics, a device registry, and a scalability analysis
+for 1000s of devices. [`docs/GLOSSARY.md`](docs/GLOSSARY.md) defines every domain term
+used by the repo and the design.
 
 ## References
 
