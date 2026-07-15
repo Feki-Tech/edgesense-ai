@@ -103,14 +103,29 @@ def main() -> int:
         return 1
 
     log = EventLog()
+    # Durable session (fixed client id + clean_session=False) with a QoS 1
+    # subscription: after the broker restart the replayed events queue at the
+    # broker until this listener reconnects, so delivery doesn't race the
+    # listener's detection of the restart (Docker Desktop's port proxy can
+    # keep the old socket alive until the keepalive timeout). First purge any
+    # stale session state from a previous run, then connect durable.
+    purge = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2,
+                        client_id="edgesense-offline-demo", clean_session=True)
+    if UPLINK_USERNAME:
+        purge.username_pw_set(UPLINK_USERNAME, UPLINK_PASSWORD)
+    try:
+        purge.connect(BROKER, UPLINK_PORT)
+        purge.disconnect()
+    except OSError:
+        pass  # broker down: main listener's connect will report it
     listener = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2,
-                           client_id="edgesense-offline-demo")
+                           client_id="edgesense-offline-demo", clean_session=False)
     if UPLINK_USERNAME:
         listener.username_pw_set(UPLINK_USERNAME, UPLINK_PASSWORD)
     listener.on_message = log.on_message
-    listener.on_connect = lambda c, *_: c.subscribe(EVENT_FILTER)
+    listener.on_connect = lambda c, *_: c.subscribe(EVENT_FILTER, qos=1)
     listener.reconnect_delay_set(1, 3)
-    listener.connect(BROKER, UPLINK_PORT)
+    listener.connect(BROKER, UPLINK_PORT, keepalive=10)
     listener.loop_start()
 
     control = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2,
