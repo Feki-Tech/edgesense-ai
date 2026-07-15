@@ -35,6 +35,10 @@ services:
     environment:
       EDGESENSE_BROKER: tcp://mosquitto:1883
       EDGESENSE_UPLINK_BROKER: tcp://mosquitto-cloud:1883
+      # Optional transport override (scheme dispatch). Empty → MQTT uplink
+      # above. Set coap://coap-receiver:5683 (make stack-coap) to send events
+      # over CoAP/UDP instead.
+      EDGESENSE_UPLINK_URL: ${EDGESENSE_UPLINK_URL:-}
       EDGESENSE_INFERENCE_URL: http://inference:8800/score
       EDGESENSE_BUFFER: /data/event-buffer.jsonl
       EDGESENSE_METRICS_ADDR: ":8890"
@@ -49,6 +53,27 @@ services:
         condition: service_started
       inference:
         condition: service_healthy
+    restart: unless-stopped
+
+  # CoAP → MQTT bridge for the constrained-link uplink (compose profile
+  # "coap", started by `make stack-coap`). Accepts CON POSTs from the agent
+  # on UDP 5683 and republishes events to mosquitto-cloud on the same
+  # edgesense/events/<machine_id> topics, so dashboard/Grafana/demos are
+  # transport-agnostic. Stop this container (make demo-offline-coap) to
+  # exercise store-and-forward over CoAP.
+  coap-receiver:
+    build: ./coap-receiver
+    container_name: edgesense-coap-receiver
+    profiles: ["coap"]
+    environment:
+      EDGESENSE_COAP_LISTEN: ":5683"
+      EDGESENSE_UPLINK_BROKER: tcp://mosquitto-cloud:1883
+      EDGESENSE_METRICS_ADDR: ":8891"
+    ports:
+      - "15683:5683/udp"
+      - "8891:8891"
+    depends_on:
+      - mosquitto-cloud
     restart: unless-stopped
 
   simulator:

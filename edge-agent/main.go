@@ -5,10 +5,12 @@
 // edgesense/events/<machine_id> when a reading is anomalous. Only events
 // leave the node.
 //
-// Events are published to the uplink broker (EDGESENSE_UPLINK_BROKER, e.g. a
-// cloud broker over a flaky LTE link). By default the uplink is the local
-// broker. Events that cannot be published (uplink outage) are buffered on
-// disk and flushed on reconnect — no event is lost.
+// Events leave through a pluggable uplink transport selected by
+// EDGESENSE_UPLINK_URL (uplink.go): MQTT by default (EDGESENSE_UPLINK_BROKER,
+// e.g. a cloud broker over a flaky LTE link; defaults to the local broker),
+// or CoAP/UDP (coap://host:port, see coap.go) for constrained links. Events
+// that cannot be published (uplink outage) are buffered on disk and flushed
+// on reconnect — no event is lost.
 //
 // Operational state is exposed on EDGESENSE_METRICS_ADDR: Prometheus
 // metrics on /metrics, liveness on /healthz (see metrics.go).
@@ -75,36 +77,22 @@ func topicMachineID(topic string) string {
 
 func main() {
 	broker := envOr("EDGESENSE_BROKER", "tcp://localhost:11883")
-	uplinkBroker := envOr("EDGESENSE_UPLINK_BROKER", broker)
+	uplinkURL := envOr("EDGESENSE_UPLINK_URL", envOr("EDGESENSE_UPLINK_BROKER", broker))
 	inferenceURL := envOr("EDGESENSE_INFERENCE_URL", "http://localhost:8800/score")
 	sensorTopic := envOr("EDGESENSE_SENSOR_TOPIC", "edgesense/sensors/#")
 	bufferPath := envOr("EDGESENSE_BUFFER", "event-buffer.jsonl")
 	metricsAddr := envOr("EDGESENSE_METRICS_ADDR", ":8890")
-	splitUplink := uplinkBroker != broker
+	splitUplink := uplinkURL != broker
 
 	httpClient := &http.Client{Timeout: 2 * time.Second}
 	buffer := newEventBuffer(bufferPath, bufferCapacity)
 	bufferDepth.Set(float64(buffer.Len())) // events may have survived a restart
 
-	var localClient, uplinkClient mqtt.Client
+	var localClient mqtt.Client
+	var uplink uplinkTransport
 
 	publishEvent := func(ev event) error {
-		payload, err := json.Marshal(ev)
-		if err != nil {
-			return err
-		}
-		// Gate on a live connection: paho would otherwise queue the message
-		// internally while reconnecting AND we'd buffer it, delivering it
-		// twice after an outage. The disk buffer owns offline events.
-		if !uplinkClient.IsConnectionOpen() {
-			return fmt.Errorf("uplink not connected")
-		}
-		topic := fmt.Sprintf("edgesense/events/%s", ev.MachineID)
-		tok := uplinkClient.Publish(topic, 1, false, payload)
-		if !tok.WaitTimeout(publishTimeout) {
-			return fmt.Errorf("publish timeout on %s", topic)
-		}
-		if err := tok.Error(); err != nil {
+		if err := uplink.Publish(ev); err != nil {
 			return err
 		}
 		eventsPublished.Inc()
@@ -188,30 +176,19 @@ func main() {
 	localClient = mqtt.NewClient(localOpts)
 
 	if splitUplink {
-		uplinkOpts := mqtt.NewClientOptions().
-			AddBroker(uplinkBroker).
-			SetClientID("edgesense-agent-uplink").
-			SetAutoReconnect(true).
-			SetConnectRetry(true).
-			SetConnectRetryInterval(2 * time.Second).
-			SetMaxReconnectInterval(10 * time.Second).
-			SetOrderMatters(false).
-			SetOnConnectHandler(func(_ mqtt.Client) {
-				log.Printf("uplink connected: %s", uplinkBroker)
-				go flush("uplink reconnect")
-			}).
-			SetConnectionLostHandler(func(_ mqtt.Client, err error) {
-				log.Printf("uplink connection lost: %v (events will be buffered)", err)
-			})
-		uplinkClient = mqtt.NewClient(uplinkOpts)
+		var err error
+		uplink, err = newUplinkTransport(uplinkURL, func() { flush("uplink reconnect") })
+		if err != nil {
+			log.Fatalf("uplink: %v", err)
+		}
 	} else {
-		uplinkClient = localClient
+		uplink = sharedMQTTUplink(localClient)
 	}
 
 	serveMetrics(metricsAddr, func() map[string]any {
 		return map[string]any{
 			"status":           "ok",
-			"uplink_connected": uplinkClient.IsConnectionOpen(),
+			"uplink_connected": uplink.Connected(),
 			"buffer_depth":     buffer.Len(),
 		}
 	})
@@ -221,17 +198,17 @@ func main() {
 		log.Fatalf("mqtt connect (local %s): %v", broker, tok.Error())
 	}
 	if splitUplink {
-		// ConnectRetry keeps trying in the background; an unreachable uplink
+		// Transports connect/probe in the background; an unreachable uplink
 		// at startup is survivable — events buffer until it comes up.
-		uplinkClient.Connect()
-		log.Printf("uplink broker: %s (store-and-forward active)", uplinkBroker)
+		uplink.Start()
+		log.Printf("uplink: %s (store-and-forward active)", uplinkURL)
 	}
 
 	ticker := time.NewTicker(flushInterval)
 	defer ticker.Stop()
 	go func() {
 		for range ticker.C {
-			if uplinkClient.IsConnectionOpen() && buffer.Len() > 0 {
+			if uplink.Connected() && buffer.Len() > 0 {
 				flush("periodic")
 			}
 		}
@@ -241,7 +218,7 @@ func main() {
 	defer statusTicker.Stop()
 	go func() {
 		for range statusTicker.C {
-			if uplinkClient.IsConnectionOpen() {
+			if uplink.Connected() {
 				uplinkUp.Set(1)
 			} else {
 				uplinkUp.Set(0)
@@ -253,9 +230,7 @@ func main() {
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 	<-sig
 	log.Printf("shutting down (%d buffered events retained)", buffer.Len())
-	if splitUplink {
-		uplinkClient.Disconnect(250)
-	}
+	uplink.Close()
 	localClient.Disconnect(250)
 }
 
