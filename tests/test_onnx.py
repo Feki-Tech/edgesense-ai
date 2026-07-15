@@ -1,4 +1,4 @@
-"""ONNX export parity: onnxruntime must reproduce sklearn's verdicts."""
+"""ONNX export parity: onnxruntime must reproduce the numpy scorer's verdicts."""
 
 from __future__ import annotations
 
@@ -6,22 +6,21 @@ import joblib
 import numpy as np
 import pytest
 
-skl2onnx = pytest.importorskip("skl2onnx")
+pytest.importorskip("onnx")
 ort = pytest.importorskip("onnxruntime")
 
+from ml.export_onnx import build_onnx  # noqa: E402
+from ml.scoring import reconstruction_errors  # noqa: E402
 from ml.train import fault_data, normal_data  # noqa: E402
 
 
 @pytest.fixture(scope="module")
-def onnx_session_and_pipeline(small_model_path):
-    pipeline = joblib.load(small_model_path)["pipeline"]
-    sample = np.array([[0.8, 45.0, 12.0]], dtype=np.float32)
-    try:
-        onx = skl2onnx.to_onnx(pipeline, X=sample, target_opset={"": 21, "ai.onnx.ml": 3})
-    except Exception as exc:  # pragma: no cover - depends on skl2onnx/sklearn combo
-        pytest.skip(f"skl2onnx cannot convert this sklearn version: {exc}")
-    sess = ort.InferenceSession(onx.SerializeToString(), providers=["CPUExecutionProvider"])
-    return sess, pipeline
+def onnx_session_and_bundle(small_model_path):
+    bundle = joblib.load(small_model_path)
+    model = build_onnx(bundle)
+    sess = ort.InferenceSession(model.SerializeToString(),
+                                providers=["CPUExecutionProvider"])
+    return sess, bundle
 
 
 def _run(sess, x: np.ndarray):
@@ -30,23 +29,37 @@ def _run(sess, x: np.ndarray):
     return np.ravel(named["label"]), np.ravel(named["scores"])
 
 
-def test_onnx_matches_sklearn(onnx_session_and_pipeline) -> None:
-    sess, pipeline = onnx_session_and_pipeline
+def test_onnx_matches_numpy_scorer(onnx_session_and_bundle) -> None:
+    sess, bundle = onnx_session_and_bundle
     rng = np.random.default_rng(7)
     x = np.vstack([normal_data(500, rng), fault_data(500, rng)])
 
     onnx_labels, onnx_scores = _run(sess, x)
-    skl_labels = pipeline.predict(x)
-    skl_scores = pipeline.decision_function(x)
+    ref_scores = reconstruction_errors(bundle, x)
+    ref_labels = (ref_scores > bundle["threshold"]).astype(np.int64)
 
-    mae = float(np.mean(np.abs(onnx_scores - skl_scores)))
-    agreement = float(np.mean(onnx_labels == skl_labels))
-    assert mae < 1e-3, f"score MAE too high: {mae}"
+    # relative error: fault scores are large, healthy scores are tiny
+    rel_mae = float(np.mean(np.abs(onnx_scores - ref_scores) / np.maximum(ref_scores, 1e-6)))
+    agreement = float(np.mean(onnx_labels == ref_labels))
+    assert rel_mae < 1e-3, f"score relative MAE too high: {rel_mae}"
     assert agreement > 0.99, f"label agreement too low: {agreement:.3%}"
 
 
-def test_onnx_flags_extreme_bearing_fault(onnx_session_and_pipeline) -> None:
-    sess, _ = onnx_session_and_pipeline
+def test_onnx_rejects_legacy_iforest_bundle(iforest_model_path) -> None:
+    bundle = joblib.load(iforest_model_path)
+    with pytest.raises(ValueError, match="autoencoder"):
+        build_onnx(bundle)
+
+
+def test_onnx_flags_extreme_bearing_fault(onnx_session_and_bundle) -> None:
+    sess, bundle = onnx_session_and_bundle
     labels, scores = _run(sess, np.array([[4.5, 46.0, 14.0]]))
-    assert labels[0] == -1
-    assert scores[0] < 0
+    assert labels[0] == 1
+    assert scores[0] > bundle["threshold"]
+
+
+def test_onnx_nominal_sample_is_normal(onnx_session_and_bundle) -> None:
+    sess, bundle = onnx_session_and_bundle
+    labels, scores = _run(sess, np.array([[0.8, 45.0, 12.0]]))
+    assert labels[0] == 0
+    assert 0 <= scores[0] <= bundle["threshold"]

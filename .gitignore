@@ -2,6 +2,7 @@
 __pycache__/
 *.pyc
 ml/model/
+ml/data/
 .idea/
 .vscode/
 edge-agent/edge-agent
