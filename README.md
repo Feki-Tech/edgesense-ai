@@ -115,6 +115,9 @@ Inject your own faults while watching the dashboard:
 ```bash
 mosquitto_pub -p 11883 -t edgesense/control/fault \
   -m '{"machine_id": "machine-02", "fault": "overheat", "ticks": 30}'
+# namespaced layout: per-machine control topic
+mosquitto_pub -p 11883 -t es/default/default/machine-02/control \
+  -m '{"fault": "overheat", "ticks": 30}'
 ```
 
 ### 2. Uplink outage with zero event loss — `make demo-offline`
@@ -265,9 +268,13 @@ buffers and replays exactly the same way (`make demo-offline-coap`).
 | `EDGESENSE_UPLINK_BROKER` | = `EDGESENSE_BROKER` | broker events are published to |
 | `EDGESENSE_UPLINK_URL` | = `EDGESENSE_UPLINK_BROKER` | uplink transport by scheme: `coap://host:port` → CoAP/UDP, anything else (`tcp://`, `ssl://`, `ws://`) → MQTT |
 | `EDGESENSE_INFERENCE_URL` | `http://localhost:8800/score` | scoring sidecar |
-| `EDGESENSE_SENSOR_TOPIC` | `edgesense/sensors/#` | subscription filter |
+| `EDGESENSE_SENSOR_TOPIC` | `edgesense/sensors/#` (legacy) / `es/<org>/<site>/+/sensors/#` (namespaced) | subscription filter |
 | `EDGESENSE_BUFFER` | `event-buffer.jsonl` | store-and-forward file |
 | `EDGESENSE_METRICS_ADDR` | `:8890` | Prometheus metrics + healthz listener |
+| `EDGESENSE_ORG` | *(unset)* | tenant org — setting this (or `EDGESENSE_SITE`) switches to the namespaced topic layout |
+| `EDGESENSE_SITE` | *(unset)* | tenant site — see `EDGESENSE_ORG` |
+| `EDGESENSE_BROKER_USERNAME` / `_PASSWORD` | *(unset)* | credentials for the local broker (anonymous when unset) |
+| `EDGESENSE_UPLINK_USERNAME` / `_PASSWORD` | *(unset)* | credentials for the uplink broker (anonymous when unset) |
 
 ## CoAP uplink (constrained/LTE links)
 
@@ -423,9 +430,76 @@ Host ports: local broker **11883**, cloud broker **12883** (1883 sits in a
 Windows/Hyper-V reserved port range when running under WSL2 + Docker Desktop);
 CoAP receiver (profile `coap`) **udp/15683**, its metrics on **8891**.
 
-- `edgesense/sensors/<machine_id>` — raw readings (JSON), ~2 Hz per machine (local broker)
-- `edgesense/events/<machine_id>` — anomaly events only (JSON, with score + reason; uplink broker)
-- `edgesense/control/fault` — on-demand fault injection for demos (local broker)
+Two topic layouts exist ([`docs/PLATFORM.md`](docs/PLATFORM.md) §4.4). The
+**legacy** flat layout is the default; the **namespaced** tenant layout switches
+on when `EDGESENSE_ORG` and/or `EDGESENSE_SITE` are set (an unset one defaults
+to `default`) — on the agent, simulator, dashboard and demo scripts alike.
+
+| Purpose | Legacy (default) | Namespaced (`EDGESENSE_ORG`/`EDGESENSE_SITE` set) |
+|---|---|---|
+| raw readings (JSON, ~2 Hz per machine; local broker) | `edgesense/sensors/<machine>` | `es/<org>/<site>/<machine>/sensors` |
+| anomaly events (JSON with score + reason; uplink broker) | `edgesense/events/<machine>` | `es/<org>/<site>/<machine>/events` |
+| fault injection for demos (local broker) | `edgesense/control/fault` (global) | `es/<org>/<site>/<machine>/control` (per machine) |
+
+The demo stack (`make stack` / `make demo` / `make demo-offline` / `make smoke`)
+runs the legacy layout on anonymous brokers — nothing to configure. To run the
+same demos on the namespaced layout:
+
+```bash
+docker compose down && EDGESENSE_ORG=default EDGESENSE_SITE=default docker compose up -d --build
+EDGESENSE_ORG=default EDGESENSE_SITE=default python scripts/demo.py
+```
+
+## Secured uplink broker (opt-in)
+
+`docker-compose.secure.yml` swaps the cloud broker for an **authenticated**
+one (`deploy/secure/`): `allow_anonymous false`, a password file and per-device
+ACLs so a device credential can publish only under its own topic prefix —
+platform phase 1 of [`docs/PLATFORM.md`](docs/PLATFORM.md) §4.2/§7. The local
+sensor bus stays anonymous (it is machine-local by design).
+
+```bash
+make stack-secure   # legacy stack + namespaced topics + authenticated uplink
+make check-acl      # prove per-device topic isolation against the live broker
+make stack-secure-down
+```
+
+Demo credentials (checked in, **demo only** — regenerate for anything real
+with `python scripts/gen_broker_auth.py`):
+
+| Username | Password | ACL |
+|---|---|---|
+| `default/default/machine-01` (…`-02`, `-03`) | `machine-01-demo-pw` … | write own `…/sensors/#` + `…/events`, read own `…/control` |
+| `acme/lyon/pump-07` | `pump-07-demo-pw` | same, under `es/acme/lyon/pump-07/…` (foreign-org fixture) |
+| `gw@default/default` | `gateway-demo-pw` | site gateway: write `es/default/default/+/events` (used by the compose agent, which scores all site machines over one connection) |
+| `ops` | `ops-demo-pw` | read `es/+/+/+/events`, write `es/+/+/+/control` (dashboard + demo listeners) |
+
+`make check-acl` (= `scripts/check_acl.py`) proves the acceptance criterion
+live: a device's own-prefix publish is delivered, publishes to a foreign org's
+or a sibling machine's prefix are **denied** (MQTT v5 `Not authorized` PUBACK,
+cross-checked by an observer seeing nothing arrive), foreign control
+subscriptions are denied, and bad/anonymous logins are rejected.
+
+Run the full demos against the secured stack:
+
+```bash
+make stack-secure
+EDGESENSE_ORG=default EDGESENSE_SITE=default \
+EDGESENSE_UPLINK_USERNAME=ops EDGESENSE_UPLINK_PASSWORD=ops-demo-pw \
+python scripts/demo.py        # same for scripts/demo_offline.py, scripts/smoke.py
+```
+
+Notes:
+
+- **Mosquitto pattern ACLs don't work with `/` in usernames** (verified on
+  mosquitto 2.x): `pattern write es/%u/events` denies even the device's own
+  publish when the username is `org/site/machine`. The ACL file therefore uses
+  generated per-device `user` blocks (registry-style — the same shape the
+  phase-2 device registry will manage via the dynamic-security plugin);
+  `scripts/gen_broker_auth.py` regenerates `deploy/secure/{acl,passwd}`.
+- **TLS is deferred** to the mTLS phase: production uplinks should enable the
+  commented `listener 8883` TLS block in `deploy/secure/mosquitto.conf`;
+  password auth without TLS is only acceptable on trusted demo networks.
 
 ## Ideas / roadmap
 

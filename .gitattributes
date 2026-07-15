@@ -1,0 +1,5 @@
+# mosquitto reads these files byte-for-byte inside a Linux container —
+# CRLF line endings would corrupt password hashes and ACL rules on
+# Windows checkouts, so force LF.
+deploy/secure/* text eol=lf
+deploy/*.conf text eol=lf

@@ -35,21 +35,35 @@ type uplinkTransport interface {
 	Close()
 }
 
+// uplinkOptions carries cross-transport settings: the topic layout (legacy
+// vs tenant-namespaced, topics.go) and optional MQTT credentials for the
+// secured uplink broker (empty strings mean anonymous).
+type uplinkOptions struct {
+	layout   topicLayout
+	username string
+	password string
+}
+
 // newUplinkTransport builds the transport for an uplink URL. onUp runs on
 // every down→up transition (used to flush the disk buffer).
-func newUplinkTransport(rawURL string, onUp func()) (uplinkTransport, error) {
+func newUplinkTransport(rawURL string, onUp func(), o uplinkOptions) (uplinkTransport, error) {
 	u, err := url.Parse(rawURL)
 	if err != nil {
 		return nil, fmt.Errorf("uplink url %q: %w", rawURL, err)
 	}
 	switch u.Scheme {
 	case "coap":
+		if o.layout.namespaced {
+			// the CoAP receiver republishes on the legacy event topic;
+			// namespaced republish lands with the receiver's own update
+			log.Printf("warning: coap uplink republishes on legacy edgesense/events/<machine> topics; namespaced layout not applied")
+		}
 		return newCoAPUplink(u, onUp)
 	case "coaps":
 		return nil, fmt.Errorf("uplink url %q: coaps (DTLS) is not supported yet", rawURL)
 	default:
 		// MQTT owns every other scheme paho accepts (tcp, ssl, ws, wss, ...).
-		return newMQTTUplink(rawURL, onUp), nil
+		return newMQTTUplink(rawURL, onUp, o), nil
 	}
 }
 
@@ -57,15 +71,18 @@ func newUplinkTransport(rawURL string, onUp func()) (uplinkTransport, error) {
 // dedicated client (split uplink) or wraps the shared local-broker client.
 type mqttUplink struct {
 	client mqtt.Client
+	layout topicLayout
 	owned  bool // whether Start/Close manage the client lifecycle
 }
 
 // newMQTTUplink creates an uplink with its own MQTT client that keeps
 // retrying in the background once started.
-func newMQTTUplink(brokerURL string, onUp func()) *mqttUplink {
+func newMQTTUplink(brokerURL string, onUp func(), o uplinkOptions) *mqttUplink {
 	opts := mqtt.NewClientOptions().
 		AddBroker(brokerURL).
 		SetClientID("edgesense-agent-uplink").
+		SetUsername(o.username).
+		SetPassword(o.password).
 		SetAutoReconnect(true).
 		SetConnectRetry(true).
 		SetConnectRetryInterval(2 * time.Second).
@@ -80,13 +97,13 @@ func newMQTTUplink(brokerURL string, onUp func()) *mqttUplink {
 		SetConnectionLostHandler(func(_ mqtt.Client, err error) {
 			log.Printf("uplink connection lost: %v (events will be buffered)", err)
 		})
-	return &mqttUplink{client: mqtt.NewClient(opts), owned: true}
+	return &mqttUplink{client: mqtt.NewClient(opts), layout: o.layout, owned: true}
 }
 
 // sharedMQTTUplink wraps an externally managed client (single-broker layout,
 // where sensors and events share the local broker connection).
-func sharedMQTTUplink(c mqtt.Client) *mqttUplink {
-	return &mqttUplink{client: c}
+func sharedMQTTUplink(c mqtt.Client, layout topicLayout) *mqttUplink {
+	return &mqttUplink{client: c, layout: layout}
 }
 
 func (m *mqttUplink) Publish(ev event) error {
@@ -100,7 +117,7 @@ func (m *mqttUplink) Publish(ev event) error {
 	if !m.client.IsConnectionOpen() {
 		return fmt.Errorf("uplink not connected")
 	}
-	topic := fmt.Sprintf("edgesense/events/%s", ev.MachineID)
+	topic := m.layout.eventTopic(ev.MachineID)
 	tok := m.client.Publish(topic, 1, false, payload)
 	if !tok.WaitTimeout(publishTimeout) {
 		return fmt.Errorf("publish timeout on %s", topic)
