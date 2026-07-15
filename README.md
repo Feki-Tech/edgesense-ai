@@ -443,6 +443,9 @@ a multi-user platform — tenancy (org → site → machine), RBAC, per-device i
 for 1000s of devices. [`docs/GLOSSARY.md`](docs/GLOSSARY.md) defines every domain term
 used by the repo and the design.
 
+[`docs/SECURITY.md`](docs/SECURITY.md) is the security chapter: an honest current-state
+assessment, a STRIDE + ML threat model, data/application/device security, and a phased hardening roadmap.
+
 [`docs/HARDWARE.md`](docs/HARDWARE.md) is the hardware chapter: replacing the simulator
 with real sensors on real machines — edge compute tiers, sensor selection, signal
 conditioning for the 2 Hz reading contract, BOMs, and the hardware team charter.
