@@ -1,0 +1,42 @@
+name: model-gate
+
+# Manually-dispatched champion/challenger promotion gate (docs/MLOPS.md).
+# Trains a challenger on CPU (sklearn backend), evaluates it against the
+# quality bar (and the champion bundle, when one is present in the workspace),
+# and uploads the candidate bundle + manifest + model card + gate report as an
+# artifact. Models are never committed by CI.
+
+on:
+  workflow_dispatch:
+    inputs:
+      seed:
+        description: Training seed for the challenger
+        required: false
+        default: "42"
+      epochs:
+        description: Training epochs (default 500 for the sklearn backend)
+        required: false
+        default: ""
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements-dev.txt
+      - name: Run the promotion gate (CPU, sklearn backend)
+        run: |
+          ARGS="--seed ${{ inputs.seed }}"
+          if [ -n "${{ inputs.epochs }}" ]; then ARGS="$ARGS --epochs ${{ inputs.epochs }}"; fi
+          python ml/promote.py $ARGS --out-dir ml/model/candidate
+      - name: Upload candidate bundle + report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: model-candidate
+          path: ml/model/candidate/
+          if-no-files-found: error

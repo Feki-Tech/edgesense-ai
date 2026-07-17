@@ -25,11 +25,11 @@ import argparse
 import sys
 from pathlib import Path
 
-import joblib
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from ml.manifest import build_manifest, data_sha256, save_bundle  # noqa: E402
 from ml.scoring import DEFAULT_Z_GUARD, reconstruction_errors  # noqa: E402
 
 FEATURES = ["vibration", "temperature", "current"]
@@ -38,6 +38,14 @@ MODEL_PATH = Path(__file__).parent / "model" / "model.joblib"
 HIDDEN_LAYERS = (16, 2, 16)  # 2-unit bottleneck for the 3 input features
 ACTIVATION = "tanh"          # saturates outside the healthy region -> big fault errors
 FP_BUDGET = 0.005            # target false-positive rate on healthy data
+
+# healthy-regime distributions of normal_data() — recorded in the manifest so a
+# bundle is traceable to the exact generative process that trained it
+GENERATOR_PARAMS = {
+    "vibration": {"mean": 0.8, "std": 0.15, "clip_min": 0.0},
+    "temperature": {"mean": 45.0, "std": 1.2},
+    "current": {"mean": 12.0, "std": 0.6, "clip_min": 0.0},
+}
 
 
 def normal_data(n: int, rng: np.random.Generator) -> np.ndarray:
@@ -136,8 +144,22 @@ def train_autoencoder(backend: str = "sklearn", *, seed: int = 42, n_train: int 
                       n_cal: int = 20_000, epochs: int | None = None) -> dict:
     """Train the autoencoder and calibrate its alarm threshold. Returns the bundle."""
     rng = np.random.default_rng(seed)
-    return build_bundle(normal_data(n_train, rng), normal_data(n_cal, rng), FEATURES,
-                        backend, seed=seed, epochs=epochs)
+    x_train, x_cal = normal_data(n_train, rng), normal_data(n_cal, rng)
+    fit_epochs = epochs or _BACKENDS[backend][1]
+    bundle = build_bundle(x_train, x_cal, FEATURES, backend, seed=seed, epochs=fit_epochs)
+    bundle["manifest"] = build_manifest(
+        bundle, seed=seed, epochs=fit_epochs,
+        training_data={
+            "generator": "synthetic-normal-v1",
+            "params": GENERATOR_PARAMS,
+            "sha256": data_sha256(x_train),
+            "fp_budget": FP_BUDGET,
+            "n_train": n_train,
+            "n_cal": n_cal,
+        },
+        metrics={"threshold": bundle["threshold"]},
+    )
+    return bundle
 
 
 def build_bundle(x_train: np.ndarray, x_cal: np.ndarray, features: list[str],
@@ -228,10 +250,14 @@ def main() -> None:
     print(f"validation: false-positive rate on normal = {fp:.3%}")
     print(f"validation: detection rate on faults      = {tp:.3%}")
 
-    out = Path(args.out)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    joblib.dump(bundle, out)
-    print(f"model saved -> {out}")
+    if "manifest" in bundle:
+        bundle["manifest"]["metrics"].update(
+            {"val_fp_rate": round(fp, 5), "val_detection_rate": round(tp, 5)})
+        print(f"model version: {bundle['manifest']['model_version']}")
+
+    out = save_bundle(bundle, args.out)
+    print(f"model saved -> {out}"
+          + (" (+ manifest + model card)" if "manifest" in bundle else ""))
 
 
 if __name__ == "__main__":

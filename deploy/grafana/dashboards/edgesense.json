@@ -97,6 +97,58 @@
         { "expr": "histogram_quantile(0.95, sum by (le) (rate(edgesense_inference_latency_seconds_bucket[5m])))", "legendFormat": "p95", "refId": "B" }
       ],
       "fieldConfig": { "defaults": { "unit": "s", "min": 0 }, "overrides": [] }
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Feature drift — PSI vs training distribution",
+      "description": "Population stability index of the sidecar's rolling window per feature. <0.1 stable, 0.1–0.25 moderate, >0.25 major drift.",
+      "gridPos": { "x": 0, "y": 23, "w": 12, "h": 9 },
+      "datasource": { "type": "prometheus", "uid": "edgesense-prom" },
+      "targets": [{ "expr": "edgesense_model_drift_psi", "legendFormat": "{{feature}}", "refId": "A" }],
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "custom": { "fillOpacity": 10, "thresholdsStyle": { "mode": "dashed" } },
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "orange", "value": 0.1 }, { "color": "red", "value": 0.25 }] }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Feature drift — z-shift of rolling mean",
+      "description": "Rolling-mean distance from the training mean in training σ, per feature (signed).",
+      "gridPos": { "x": 12, "y": 23, "w": 12, "h": 9 },
+      "datasource": { "type": "prometheus", "uid": "edgesense-prom" },
+      "targets": [{ "expr": "edgesense_model_drift_zshift", "legendFormat": "{{feature}}", "refId": "A" }],
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "fillOpacity": 10, "thresholdsStyle": { "mode": "dashed" } },
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 0.5 }] }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 11,
+      "type": "stat",
+      "title": "Model version (inference sidecar)",
+      "gridPos": { "x": 0, "y": 32, "w": 6, "h": 5 },
+      "datasource": { "type": "prometheus", "uid": "edgesense-prom" },
+      "targets": [{ "expr": "edgesense_model_info", "legendFormat": "{{model_version}}", "refId": "A" }],
+      "fieldConfig": { "defaults": { "thresholds": { "mode": "absolute", "steps": [{ "color": "blue", "value": null }] } }, "overrides": [] },
+      "options": { "colorMode": "value", "graphMode": "none", "textMode": "name" }
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "Anomaly score p95 (sidecar)",
+      "gridPos": { "x": 6, "y": 32, "w": 18, "h": 5 },
+      "datasource": { "type": "prometheus", "uid": "edgesense-prom" },
+      "targets": [{ "expr": "histogram_quantile(0.95, sum by (le) (rate(edgesense_model_score_bucket[5m])))", "legendFormat": "score p95", "refId": "A" }],
+      "fieldConfig": { "defaults": { "min": 0 }, "overrides": [] }
     }
   ],
   "schemaVersion": 39,
