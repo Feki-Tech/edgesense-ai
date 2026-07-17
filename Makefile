@@ -2,7 +2,7 @@ VENV := .venv
 PY := $(VENV)/bin/python
 MACHINES ?= 10
 
-.PHONY: setup deps broker broker-down train export-onnx inference agent simulate dashboard mcp smoke test snap stack stack-down stack-logs stack-coap stack-secure stack-secure-down check-acl demo demo-offline demo-offline-coap eval benchmark fleet
+.PHONY: setup deps broker broker-down train export-onnx inference agent simulate dashboard mcp smoke test snap stack stack-down stack-logs stack-coap stack-secure stack-secure-down check-acl demo demo-offline demo-offline-coap eval benchmark fleet promote promote-torch
 
 stack:
 	docker compose up -d --build
@@ -36,6 +36,12 @@ demo-offline-coap: ## same outage demo for the CoAP stack (stops+restarts the re
 
 eval:            ## offline model evaluation -> docs/EVALUATION.md
 	$(PY) ml/evaluate.py --out docs/EVALUATION.md
+
+promote:         ## champion/challenger gate: train, evaluate both, promote or refuse
+	$(PY) ml/promote.py
+
+promote-torch:   ## same gate with a PyTorch-trained challenger (needs requirements-torch.txt)
+	$(PY) ml/promote.py --backend torch
 
 benchmark:       ## public-dataset benchmark (downloads AI4I 2020 once) -> docs/BENCHMARK.md
 	$(PY) ml/benchmark_public.py --out docs/BENCHMARK.md

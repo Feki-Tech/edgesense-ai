@@ -9,6 +9,7 @@ code (file references given). Terms introduced by these design chapters are mark
 
 Groups: [Domain & telemetry](#domain--telemetry) ·
 [Detection](#detection) ·
+[MLOps](#mlops) ·
 [Transport & reliability](#transport--reliability) ·
 [Platform & identity](#platform--identity) ·
 [Security](#security) ·
@@ -110,6 +111,79 @@ evaluation, 0 across 171 healthy readings in the live demo (README).
 legacy baseline: the assumed fraction of anomalies in training data, wired to
 `FP_BUDGET` (0.005) in `ml/train.py`. Kept only for the `--model iforest` comparison
 baseline.
+
+---
+
+## MLOps
+
+The model-lifecycle vocabulary of [`MLOPS.md`](MLOPS.md). Phase 1 terms are
+*current* (shipped); later-phase terms are marked ***(proposed)***.
+
+**Model bundle** — the serialized model artifact (`ml/model/model.joblib`): raw numpy
+weights, scaler mean/scale, calibrated threshold, z-guard and (since MLOps phase 1) the
+embedded manifest. Backend-agnostic — serving needs neither torch nor sklearn
+(`ml/train.py`, `ml/scoring.py`).
+
+**Model manifest** — the machine-readable record of what a bundle is and where it came
+from: schema version, model version, creation time, git commit, backend, training
+config (seed/epochs/architecture/FP budget), training-data descriptor with content
+hash, and a metrics snapshot. Embedded in the bundle and written as a sidecar
+`model.manifest.json` (`ml/manifest.py`).
+
+**Model version** — `{YYYYMMDD.HHMMSS}+{git7}` (UTC): sortable, unique per retrain,
+traceable to a commit. Reported by the sidecar's `/healthz` and the
+`edgesense_model_info` metric; Docker builds pass the commit via the
+`EDGESENSE_GIT_COMMIT` build arg (`ml/manifest.py`).
+
+**Model card** — the human-readable summary generated from the manifest
+(`ml/model/MODEL_CARD.md`): version, architecture, training data, metrics, intended
+use and limits (`ml/manifest.py`).
+
+**Drift (data drift)** — the serving data distribution moving away from the training
+distribution, degrading a model silently. Detected sidecar-side from a rolling window
+of scored readings compared against the training mean/scale already carried by the
+bundle (`inference/drift.py`).
+
+**PSI (population stability index)** — a drift measure comparing binned distributions:
+`Σ (actual − expected) · ln(actual/expected)` over fixed bins of the standardized
+feature. Reading: < 0.1 stable, 0.1–0.25 moderate, > 0.25 major drift. Exported as
+`edgesense_model_drift_psi{feature}`; a provisioned Grafana alert fires at > 0.2 for
+10 minutes (`inference/drift.py`).
+
+**Z-shift** — the companion drift signal: the rolling mean's distance from the training
+mean in training standard deviations, signed to show direction
+(`edgesense_model_drift_zshift{feature}`, `inference/drift.py`).
+
+**Champion / challenger** — the promotion pattern: the *champion* is the currently
+served bundle; a *challenger* is a freshly trained candidate that must beat the quality
+bar **and** not regress against the champion before it may replace it (`ml/promote.py`).
+
+**Promotion gate** — the automated check that decides champion replacement: offline
+evaluation of both models (episodes detected, median time-to-detect, healthy FP rate),
+ONNX parity, and champion-relative tolerances; promotes atomically or refuses with a
+diff table. CI-ready exit codes; run via `make promote` or the `model-gate` workflow
+(`ml/promote.py`).
+
+**Hot reload** — swapping the served bundle without restarting the sidecar:
+`POST /reload` (or SIGHUP) validates the on-disk bundle and atomically exchanges the
+in-memory model; scoring never sees a half-swapped bundle and an invalid file leaves
+the old model serving (`inference/server.py`).
+
+**Shadow deployment** ***(proposed)*** — serving the champion while a challenger scores
+the same readings without acting on them, so promotion decisions gain live-traffic
+evidence on top of the offline bar (MLOPS.md phase 2+).
+
+**OTA model update** ***(proposed)*** — delivering promoted bundles to edge devices
+over the air as signed artifacts with signature verification before reload
+([`SECURITY.md`](SECURITY.md) §5/P4, MLOPS.md phase 2+).
+
+**Model registry** ***(proposed)*** — the service holding model artifacts, manifests
+and promotion history per org/site, replacing bake-at-build with pull-by-version
+([`PLATFORM.md`](PLATFORM.md) §5, MLOPS.md phase 2+).
+
+**Continuous training** ***(proposed)*** — scheduled retrain-and-gate runs on field
+data, gated on the poisoning mitigations of [`SECURITY.md`](SECURITY.md) §2.4
+(authenticated sensor path, data provenance, canary evaluation) (MLOPS.md phase 2+).
 
 ---
 

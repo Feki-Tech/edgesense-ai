@@ -24,6 +24,16 @@ def small_model_path(tmp_path_factory: pytest.TempPathFactory) -> Path:
 
 
 @pytest.fixture(scope="session")
+def legacy_model_path(small_model_path, tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """Pre-phase-1 bundle: same weights, no manifest key (backward compat)."""
+    bundle = {k: v for k, v in joblib.load(small_model_path).items()
+              if k != "manifest"}
+    path = tmp_path_factory.mktemp("model-legacy") / "model.joblib"
+    joblib.dump(bundle, path)
+    return path
+
+
+@pytest.fixture(scope="session")
 def iforest_model_path(tmp_path_factory: pytest.TempPathFactory) -> Path:
     """Legacy IsolationForest bundle (comparison baseline; exercises dispatch)."""
     from sklearn.ensemble import IsolationForest

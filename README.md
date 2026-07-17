@@ -177,8 +177,8 @@ offline test with synthetic data, so CI never touches the network.
 | Path         | Role                                                              |
 |--------------|-------------------------------------------------------------------|
 | `simulator/` | Simulates machines publishing vibration / temperature / current over MQTT, with random or on-demand (control-topic) fault episodes. |
-| `ml/`        | Trains a small autoencoder on normal operating data (sklearn or PyTorch backend) → `ml/model/model.joblib`; hybrid scoring (`scoring.py`); offline evaluation (`evaluate.py`); ONNX export (`export_onnx.py`). |
-| `inference/` | FastAPI sidecar serving the model (`POST /score`).                 |
+| `ml/`        | Trains a small autoencoder on normal operating data (sklearn or PyTorch backend) → `ml/model/model.joblib` + manifest + model card (`manifest.py`); hybrid scoring (`scoring.py`); offline evaluation (`evaluate.py`); champion/challenger promotion gate (`promote.py`); ONNX export (`export_onnx.py`). |
+| `inference/` | FastAPI sidecar serving the model (`POST /score`), model/drift metrics (`GET /metrics`) and hot reload (`POST /reload`). |
 | `edge-agent/`| Go agent: subscribes to sensor topics, scores each reading, publishes anomaly events to the uplink (MQTT by default, CoAP optional) with store-and-forward buffering. |
 | `coap-receiver/` | Go CoAP→MQTT bridge for the constrained-link uplink: accepts CoAP POSTs of events and republishes them to the cloud broker (compose profile `coap`). |
 | `dashboard/` | Streamlit live dashboard: signals, anomaly markers, event feed.    |
@@ -240,6 +240,14 @@ deviates more than `z_guard` (default 6σ) from the training distribution.
 The guard is the certified hard limit for single-feature drift and a
 backstop for anything the model might learn to reconstruct. Responses carry
 a `reason` field: `model`, `limit`, or `model+limit`.
+
+Every trained bundle ships with a **manifest** (version
+`{YYYYMMDD.HHMMSS}+{git7}`, training config, training-data hash, metrics
+snapshot) plus a sidecar `model.manifest.json` and a generated
+`MODEL_CARD.md`; `/healthz` reports the live `model_version`. New models
+only replace the served one through the **champion/challenger promotion
+gate** (`make promote`), and the sidecar hot-swaps bundles via `POST
+/reload` — see [`docs/MLOPS.md`](docs/MLOPS.md).
 
 Compared head-to-head with the IsolationForest baseline (`ml/evaluate.py
 --model <bundle>`), the autoencoder lifts model-side detection on synthetic
@@ -342,12 +350,27 @@ The agent exposes its operational state on `EDGESENSE_METRICS_ADDR`:
 | `edgesense_uplink_connected` | gauge | 1 while the uplink is healthy (MQTT: connection open; CoAP: last exchange/probe succeeded) |
 | `edgesense_inference_latency_seconds` | histogram | scoring round-trip latency |
 
-The compose stack ships Prometheus (scraping the agent every 5 s) and Grafana
-with an auto-provisioned **EdgeSense AI — fleet & agent** dashboard
-(anonymous access, no login): uplink status, buffer depth, per-machine
-reading/anomaly rates, and p50/p95 inference latency. `make demo-offline`
-asserts against these metrics — the buffer-depth gauge must drain to zero
-after the replay.
+The inference sidecar exposes its own `GET /metrics` on port 8800
+([`docs/MLOPS.md`](docs/MLOPS.md)):
+
+| Metric | Type | Meaning |
+|---|---|---|
+| `edgesense_model_scored_total` | counter | readings scored by the sidecar |
+| `edgesense_model_anomalies_total{reason}` | counter | flagged readings by trigger |
+| `edgesense_model_score` | histogram | anomaly-score distribution |
+| `edgesense_model_drift_zshift{feature}` | gauge | rolling-mean shift vs the training mean (in training σ) |
+| `edgesense_model_drift_psi{feature}` | gauge | PSI of the rolling window vs the training distribution |
+| `edgesense_model_info{model_version,…}` | gauge | live model metadata |
+| `edgesense_model_reloads_total{result}` | counter | hot-reload attempts |
+
+The compose stack ships Prometheus (scraping the agent and the inference
+sidecar every 5 s) and Grafana with an auto-provisioned **EdgeSense AI —
+fleet & agent** dashboard (anonymous access, no login): uplink status,
+buffer depth, per-machine reading/anomaly rates, p50/p95 inference latency,
+per-feature drift (PSI + z-shift) and the live model version — plus a
+provisioned alert that fires when any feature's PSI stays above 0.2 for
+10 minutes. `make demo-offline` asserts against these metrics — the
+buffer-depth gauge must drain to zero after the replay.
 
 ## MCP server
 
@@ -422,7 +445,10 @@ GitHub Actions (`.github/workflows/ci.yml`) runs both suites on every push
 and pull request: a Python 3.12 job (`pytest`) and a Go 1.22 job matrix over
 both modules — `edge-agent` and `coap-receiver` (`go vet`, `go build`,
 `go test`; the CoAP tests run an in-process UDP server, no external
-services).
+services). A separate manually-dispatched **model-gate** workflow
+(`.github/workflows/model-gate.yml`) runs the champion/challenger promotion
+gate on CPU and uploads the candidate bundle + report as an artifact — see
+[`docs/MLOPS.md`](docs/MLOPS.md).
 
 ## MQTT topics & ports
 
@@ -506,8 +532,10 @@ Notes:
 - [ ] Run ONNX inference inside the Go agent (onnxruntime bindings), drop the sidecar
 - [x] Replace IsolationForest with an autoencoder for richer fault signatures
 - [x] CoAP uplink for constrained/LTE links
-- [ ] Alerting: Grafana alert rules on buffer depth / uplink downtime
+- [x] MLOps phase 1: model manifest & versioning, serving-side drift metrics, hot reload, champion/challenger promotion gate ([`docs/MLOPS.md`](docs/MLOPS.md))
+- [ ] Alerting: Grafana alert rules on buffer depth / uplink downtime (drift alert shipped with MLOps phase 1)
 - [ ] Inference service as a second snap; model updates as snap refreshes
+- [ ] MLOps phase 2: OTA model delivery with signature verification, shadow scoring, feedback/labeling loop, per-machine thresholds, model registry (outlook in [`docs/MLOPS.md`](docs/MLOPS.md))
 
 ## Platform vision
 
@@ -519,6 +547,11 @@ used by the repo and the design.
 
 [`docs/SECURITY.md`](docs/SECURITY.md) is the security chapter: an honest current-state
 assessment, a STRIDE + ML threat model, data/application/device security, and a phased hardening roadmap.
+
+[`docs/MLOPS.md`](docs/MLOPS.md) is the MLOps chapter: the model lifecycle
+(train → calibrate → bake → serve), phase 1 (manifest & versioning, drift
+detection, hot reload, promotion gate) and the phase-2+ outlook (OTA model
+delivery, shadow scoring, feedback loop, registry).
 
 [`docs/HARDWARE.md`](docs/HARDWARE.md) is the hardware chapter: replacing the simulator
 with real sensors on real machines — edge compute tiers, sensor selection, signal
