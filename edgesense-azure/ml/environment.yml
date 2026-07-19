@@ -1,0 +1,11 @@
+name: edgesense-serving
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - pip
+  - pip:
+      - numpy
+      - joblib
+      - scikit-learn
+      - azureml-inference-server-http

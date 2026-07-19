@@ -1,0 +1,56 @@
+name: Retrain on drift
+
+# Continuous training, event-driven with zero extra infrastructure:
+#
+#   Grafana drift alert (PSI > 0.2 for 10m)
+#     └─ webhook contact point → GitHub API repository_dispatch
+#          └─ this workflow → az ml job create (serverless retrain)
+#               └─ train → gate → register (champion/challenger)
+#
+# Also manually triggerable, and on a weekly safety-net schedule.
+#
+# Setup (see docs/PHASE3-4.md):
+#   - Grafana contact point: POST https://api.github.com/repos/<owner>/<repo>/dispatches
+#     body: {"event_type": "drift-alert"}
+#     header: Authorization: Bearer <fine-grained PAT with contents:write>
+#   - Reuses the OIDC identity + repo variables from azure-deploy.yml.
+
+on:
+  repository_dispatch:
+    types: [drift-alert]
+  workflow_dispatch:
+  schedule:
+    - cron: "0 3 * * 1" # Mondays 03:00 UTC — weekly safety net
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: retrain # never run two retrains at once
+  cancel-in-progress: false
+
+jobs:
+  retrain:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Install ML extension
+        run: az extension add -n ml -y
+
+      - name: Submit retraining job
+        run: |
+          echo "Trigger: ${{ github.event_name }} (${{ github.event.action || 'n/a' }})"
+          az ml job create \
+            --file edgesense-azure/ml/retrain_job.yml \
+            --workspace-name "${{ vars.AML_WORKSPACE }}" \
+            --resource-group "${{ vars.RESOURCE_GROUP }}" \
+            --stream
