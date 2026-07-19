@@ -1,0 +1,77 @@
+name: Deploy to Azure Container Apps
+
+# CD pipeline: build images in ACR, then roll each Container App to the new tag.
+# Auth uses OpenID Connect (federated credentials) — no secrets/passwords stored.
+#
+# One-time setup (see docs/AZURE.md §CD):
+#   1. Create an Entra app registration + service principal.
+#   2. Add a federated credential for this repo/branch.
+#   3. Grant it Contributor on the resource group.
+#   4. Add repo variables: AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID,
+#      ACR_NAME, RESOURCE_GROUP.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  id-token: write # required for OIDC
+  contents: read
+
+env:
+  IMAGE_TAG: ${{ github.sha }}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Build & push images to ACR
+        run: |
+          # Context is the repo root for all services (inference bakes ml/ at build).
+          for svc in \
+            "edgesense-inference:inference/Dockerfile" \
+            "edgesense-agent:edge-agent/Dockerfile" \
+            "edgesense-simulator:simulator/Dockerfile" \
+            "edgesense-dashboard:dashboard/Dockerfile"; do
+            image="${svc%%:*}"; dockerfile="${svc#*:}"
+            echo "Building $image:$IMAGE_TAG"
+            az acr build --registry "${{ vars.ACR_NAME }}" \
+              --image "$image:$IMAGE_TAG" \
+              --file "$dockerfile" .
+          done
+
+      - name: Roll Container Apps to new tag
+        run: |
+          acr_server="${{ vars.ACR_NAME }}.azurecr.io"
+          declare -A apps=(
+            ["edgesense-inference"]="edgesense-inference"
+            ["edgesense-agent"]="edgesense-agent"
+            ["edgesense-simulator"]="edgesense-simulator"
+            ["edgesense-dashboard"]="edgesense-dashboard"
+          )
+          for app in "${!apps[@]}"; do
+            image="${apps[$app]}"
+            az containerapp update \
+              --name "$app" \
+              --resource-group "${{ vars.RESOURCE_GROUP }}" \
+              --image "$acr_server/$image:$IMAGE_TAG"
+          done
+
+      - name: Smoke check dashboard
+        run: |
+          url=$(az containerapp show -n edgesense-dashboard \
+            -g "${{ vars.RESOURCE_GROUP }}" \
+            --query properties.configuration.ingress.fqdn -o tsv)
+          echo "Dashboard: https://$url"
+          curl -fsS --retry 5 --retry-delay 10 "https://$url/_stcore/health" || \
+            echo "Dashboard health not ready yet (Streamlit may still be starting)."

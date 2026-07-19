@@ -1,0 +1,15 @@
+# Copy to terraform.tfvars and adjust. terraform.tfvars is gitignored.
+prefix    = "edgesense"
+location  = "germanywestcentral"
+image_tag = "latest"
+
+tags = {
+  project = "edgesense-ai"
+  owner   = "mohamed-feki"
+  env     = "demo"
+}
+
+# Phase gates — leave both false for a Phase-1-only apply (Container Apps +
+# ACR, no AML workspace, no Grafana). Flip on when you're ready for that phase.
+# enable_phase2_azureml = true   # Azure ML workspace + MLflow registry
+# enable_phase3         = true   # Key Vault-backed secrets + Managed Grafana (~EUR 8-10/mo, requires enable_phase2_azureml)
