@@ -1,0 +1,35 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "broker",
+      "runtimeExecutable": "docker",
+      "runtimeArgs": ["compose", "up", "-d", "mosquitto"],
+      "port": 11883
+    },
+    {
+      "name": "inference",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["-m", "uvicorn", "inference.server:app", "--host", "0.0.0.0", "--port", "8800"],
+      "port": 8800
+    },
+    {
+      "name": "dashboard",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["-m", "streamlit", "run", "dashboard/app.py", "--server.port", "8501", "--server.headless", "true"],
+      "port": 8501
+    },
+    {
+      "name": "edge-agent",
+      "runtimeExecutable": "go",
+      "runtimeArgs": ["run", "./edge-agent"],
+      "port": 8890
+    },
+    {
+      "name": "simulator",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["simulator/simulate.py", "--broker", "localhost", "--port", "11883", "--machines", "3"],
+      "port": 11883
+    }
+  ]
+}
