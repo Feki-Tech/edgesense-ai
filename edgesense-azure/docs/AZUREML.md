@@ -31,7 +31,7 @@ workspace**, and adds an optional **managed online endpoint** for the
 terraform apply          # adds the workspace to the existing stack
 
 # 1) point MLflow at the workspace
-pip install mlflow azureml-mlflow azure-ai-ml azure-identity
+pip install "mlflow<3" azureml-mlflow azure-ai-ml azure-identity  # azureml-mlflow needs mlflow 2.x
 export MLFLOW_TRACKING_URI=$(az ml workspace show -n edgesense-mlw \
     -g edgesense-rg --query mlflow_tracking_uri -o tsv)
 

@@ -15,7 +15,7 @@ description: >
 code: ../..   # repo root (this file lives at edgesense-azure/ml/ inside the repo)
 
 command: >-
-  pip install -r requirements.txt mlflow azureml-mlflow &&
+  pip install -r requirements.txt "mlflow<3" azureml-mlflow &&
   python ml/train.py &&
   python ml/evaluate.py &&
   if python ml/promote.py --candidate ml/model; then
