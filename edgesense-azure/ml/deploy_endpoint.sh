@@ -18,9 +18,17 @@ ENDPOINT="edgesense-anomaly-ep"
 az ml online-endpoint create --name "$ENDPOINT" -w "$WS" -g "$RG" \
   --auth-mode key || echo "(endpoint may already exist)"
 
+# Resolve the champion version from the registry tag (no alias support in AML).
+CHAMPION=$(az ml model show -n edgesense-anomaly -w "$WS" -g "$RG" \
+  --query "tags.champion_version" -o tsv 2>/dev/null || true)
+MODEL_REF="azureml:edgesense-anomaly@latest"
+[ -n "$CHAMPION" ] && MODEL_REF="azureml:edgesense-anomaly:$CHAMPION"
+echo "Deploying model: $MODEL_REF"
+
 az ml online-deployment create --name blue \
   --endpoint-name "$ENDPOINT" -w "$WS" -g "$RG" \
   --file "$(dirname "$0")/deployment.yml" \
+  --set model="$MODEL_REF" \
   --set instance_type="$SKU" \
   --all-traffic
 

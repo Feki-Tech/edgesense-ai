@@ -57,6 +57,40 @@ RELOADS = Counter(
     "Hot-reload attempts, by result",
     ["result"], registry=REGISTRY)
 
+SHADOW_SCORED = Counter(
+    "edgesense_model_shadow_scored_total",
+    "Readings also scored by the shadow (challenger) model",
+    registry=REGISTRY)
+
+SHADOW_DISAGREEMENTS = Counter(
+    "edgesense_model_shadow_disagreements_total",
+    "Champion/shadow verdict disagreements, by which side flagged the anomaly",
+    ["kind"], registry=REGISTRY)
+
+SHADOW_ERRORS = Counter(
+    "edgesense_model_shadow_errors_total",
+    "Shadow scoring failures (champion serving is unaffected)",
+    registry=REGISTRY)
+
+SHADOW_SCORE_DIFF = Histogram(
+    "edgesense_model_shadow_score_diff",
+    "Absolute champion-vs-shadow score difference per reading",
+    buckets=(0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5,
+             1.0, 2.5, 5.0, 10.0, 25.0, 50.0, 100.0),
+    registry=REGISTRY)
+
+SHADOW_INFO = Gauge(
+    "edgesense_model_shadow_info",
+    "Live shadow metadata (value is 1 while a shadow is loaded)",
+    ["model_version"], registry=REGISTRY)
+
+
+def set_shadow_info(version: str | None) -> None:
+    """Point edgesense_model_shadow_info at the live shadow, or clear it."""
+    SHADOW_INFO.clear()
+    if version is not None:
+        SHADOW_INFO.labels(model_version=version).set(1)
+
 
 def set_model_info(version: str, kind: str, backend: str) -> None:
     """Point edgesense_model_info at the live model (single active label set)."""

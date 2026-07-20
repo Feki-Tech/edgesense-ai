@@ -10,18 +10,22 @@ experiment_name: edgesense-continuous-training
 description: >
   Drift-triggered retraining: train a challenger on fresh healthy data,
   run the champion/challenger promotion gate, and register the winner
-  (champion alias) or park it (challenger alias) in the MLflow registry.
+  as champion or park it as challenger (role tags) in the MLflow registry.
 
-code: ../../edgesense-ai   # adjust if the repo sits elsewhere relative to this file
+code: ../..   # repo root (this file lives at edgesense-azure/ml/ inside the repo)
 
+# promote.py trains the challenger, replays the offline evaluation harness on
+# challenger + current champion, and exits 0 (promoted -> ml/model is the new
+# champion), 1 (refused -> candidate parked in --out-dir), or 2 (error).
 command: >-
-  pip install -r requirements.txt mlflow azureml-mlflow &&
-  python ml/train.py &&
-  python ml/evaluate.py &&
-  if python ml/promote.py --candidate ml/model; then
-    python ../edgesense-azure/ml/register_model.py --bundle ml/model --promote;
+  pip install -r requirements.txt "mlflow<3" azureml-mlflow &&
+  rc=0; python ml/promote.py --out-dir ml/model/candidate || rc=$?;
+  if [ "$rc" -eq 0 ]; then
+    python ml/register_model.py --bundle ml/model --promote;
+  elif [ "$rc" -eq 1 ]; then
+    python ml/register_model.py --bundle ml/model/candidate;
   else
-    python ../edgesense-azure/ml/register_model.py --bundle ml/model;
+    exit "$rc";
   fi
 
 environment: azureml:AzureML-sklearn-1.5@latest
@@ -29,9 +33,3 @@ environment: azureml:AzureML-sklearn-1.5@latest
 resources:
   instance_type: Standard_E4s_v3
   instance_count: 1
-
-# NOTE:
-# - Check `python ml/promote.py --help` for the real gate CLI flags and adjust.
-# - The register step path assumes edgesense-azure/ sits beside edgesense-ai/
-#   inside the uploaded code snapshot; simplest is to copy register_model.py
-#   into edgesense-ai/ml/ and shorten the command.

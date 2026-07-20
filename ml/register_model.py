@@ -12,7 +12,7 @@ Flow:
             tagging it with the EdgeSense manifest version + metrics.
 
 Usage:
-  pip install mlflow azureml-mlflow azure-ai-ml azure-identity
+  pip install "mlflow<3" azureml-mlflow azure-ai-ml azure-identity  # azureml-mlflow needs mlflow 2.x
   export MLFLOW_TRACKING_URI=$(az ml workspace show -n edgesense-mlw \
       -g edgesense-rg --query mlflow_tracking_uri -o tsv)
   python register_model.py --bundle ../edgesense-ai/ml/model \
@@ -37,7 +37,7 @@ def main() -> int:
                     help="Path to ml/model/ (model.joblib + model.manifest.json)")
     ap.add_argument("--model-name", default=MODEL_NAME)
     ap.add_argument("--promote", action="store_true",
-                    help="Set the 'champion' alias to the newly registered version "
+                    help="Tag the newly registered version as champion "
                          "(run ml/promote.py first — this script does NOT gate).")
     args = ap.parse_args()
 
@@ -48,7 +48,7 @@ def main() -> int:
         return 1
     manifest = json.loads(manifest_path.read_text())
 
-    version_tag = manifest.get("version", "unknown")
+    version_tag = manifest.get("model_version", "unknown")
     metrics = manifest.get("metrics", {})
 
     mlflow.set_experiment("edgesense-training")
@@ -59,7 +59,7 @@ def main() -> int:
                 mlflow.log_metric(key, value)
         mlflow.log_params({
             "edgesense_version": version_tag,
-            "training_data_hash": manifest.get("training_data_hash", ""),
+            "training_data_hash": manifest.get("training_data", {}).get("sha256", ""),
         })
         # Log the whole bundle (joblib + manifest + model card) as artifacts.
         mlflow.log_artifacts(str(bundle), artifact_path="model")
@@ -72,12 +72,16 @@ def main() -> int:
     client.set_model_version_tag(args.model_name, mv.version,
                                  "edgesense_version", version_tag)
 
+    # Azure ML's MLflow registry doesn't implement the alias API (404), so
+    # champion/challenger live in tags: a model-level 'champion_version'
+    # pointer plus a per-version 'role' tag.
     if args.promote:
-        client.set_registered_model_alias(args.model_name, "champion", mv.version)
-        print(f"alias 'champion' -> v{mv.version}")
+        client.set_model_version_tag(args.model_name, mv.version, "role", "champion")
+        client.set_registered_model_tag(args.model_name, "champion_version", mv.version)
+        print(f"champion_version -> v{mv.version}")
     else:
-        client.set_registered_model_alias(args.model_name, "challenger", mv.version)
-        print(f"alias 'challenger' -> v{mv.version} (run promote.py, then re-run with --promote)")
+        client.set_model_version_tag(args.model_name, mv.version, "role", "challenger")
+        print(f"v{mv.version} tagged challenger (run promote.py, then re-run with --promote)")
     return 0
 
 

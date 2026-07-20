@@ -4,7 +4,9 @@
 $schema: https://azuremlschemas.azureedge.net/latest/managedOnlineDeployment.schema.json
 name: blue
 endpoint_name: edgesense-anomaly-ep
-model: azureml:edgesense-anomaly@champion
+# Azure ML has no MLflow alias support; deploy_endpoint.sh resolves the
+# champion version from the model's 'champion_version' tag and overrides this.
+model: azureml:edgesense-anomaly@latest
 code_configuration:
   code: .
   scoring_script: score.py
