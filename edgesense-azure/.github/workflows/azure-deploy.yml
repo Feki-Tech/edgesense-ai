@@ -41,17 +41,18 @@ jobs:
         run: |
           acr_server="${{ vars.ACR_NAME }}.azurecr.io"
           az acr login --name "${{ vars.ACR_NAME }}"
-          # Context is the repo root for all services (inference bakes ml/ at build).
+          # image:dockerfile:context — inference needs the repo root (bakes ml/
+          # at build), the agent expects edge-agent/ itself (mirrors compose).
           for svc in \
-            "edgesense-inference:inference/Dockerfile" \
-            "edgesense-agent:edge-agent/Dockerfile" \
-            "edgesense-simulator:simulator/Dockerfile" \
-            "edgesense-dashboard:dashboard/Dockerfile"; do
-            image="${svc%%:*}"; dockerfile="${svc#*:}"
+            "edgesense-inference:inference/Dockerfile:." \
+            "edgesense-agent:edge-agent/Dockerfile:edge-agent" \
+            "edgesense-simulator:simulator/Dockerfile:simulator" \
+            "edgesense-dashboard:dashboard/Dockerfile:dashboard"; do
+            IFS=: read -r image dockerfile context <<< "$svc"
             echo "Building $image:$IMAGE_TAG"
             docker build -t "$acr_server/$image:$IMAGE_TAG" \
                          -t "$acr_server/$image:latest" \
-                         -f "$dockerfile" .
+                         -f "$dockerfile" "$context"
             docker push --all-tags "$acr_server/$image"
           done
 

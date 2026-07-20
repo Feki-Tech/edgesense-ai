@@ -13,24 +13,24 @@ ACR_NAME="${1:?Usage: build-and-push.sh <acr-name> [tag] [repo-root]}"
 TAG="${2:-latest}"
 REPO_ROOT="${3:-.}"
 
-# NOTE: context is the REPO ROOT for every service — the inference image
-# bakes a trained model at build time and needs ml/ from the root; keeping
-# one context for all four matches docker-compose behavior.
+# image -> "dockerfile:context" (paths relative to REPO_ROOT). Inference
+# builds from the repo root because it bakes ml/ at build time; the other
+# services expect their own directory as context (mirrors docker-compose).
 declare -A SERVICES=(
-  ["edgesense-inference"]="inference/Dockerfile"
-  ["edgesense-agent"]="edge-agent/Dockerfile"
-  ["edgesense-simulator"]="simulator/Dockerfile"
-  ["edgesense-dashboard"]="dashboard/Dockerfile"
+  ["edgesense-inference"]="inference/Dockerfile:."
+  ["edgesense-agent"]="edge-agent/Dockerfile:edge-agent"
+  ["edgesense-simulator"]="simulator/Dockerfile:simulator"
+  ["edgesense-dashboard"]="dashboard/Dockerfile:dashboard"
 )
 
 for image in "${!SERVICES[@]}"; do
-  dockerfile="${SERVICES[$image]}"
-  echo ">> Building ${image}:${TAG} (context: ${REPO_ROOT}, file: ${dockerfile})"
+  IFS=: read -r dockerfile context <<< "${SERVICES[$image]}"
+  echo ">> Building ${image}:${TAG} (context: ${REPO_ROOT}/${context}, file: ${dockerfile})"
   az acr build \
     --registry "${ACR_NAME}" \
     --image "${image}:${TAG}" \
     --file "${REPO_ROOT}/${dockerfile}" \
-    "${REPO_ROOT}"
+    "${REPO_ROOT}/${context}"
 done
 
 echo "All images pushed to ${ACR_NAME} with tag ${TAG}."

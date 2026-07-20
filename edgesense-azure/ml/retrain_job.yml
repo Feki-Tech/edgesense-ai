@@ -12,16 +12,16 @@ description: >
   run the champion/challenger promotion gate, and register the winner
   (champion alias) or park it (challenger alias) in the MLflow registry.
 
-code: ../../edgesense-ai   # adjust if the repo sits elsewhere relative to this file
+code: ../..   # repo root (this file lives at edgesense-azure/ml/ inside the repo)
 
 command: >-
   pip install -r requirements.txt mlflow azureml-mlflow &&
   python ml/train.py &&
   python ml/evaluate.py &&
   if python ml/promote.py --candidate ml/model; then
-    python ../edgesense-azure/ml/register_model.py --bundle ml/model --promote;
+    python ml/register_model.py --bundle ml/model --promote;
   else
-    python ../edgesense-azure/ml/register_model.py --bundle ml/model;
+    python ml/register_model.py --bundle ml/model;
   fi
 
 environment: azureml:AzureML-sklearn-1.5@latest
@@ -29,9 +29,3 @@ environment: azureml:AzureML-sklearn-1.5@latest
 resources:
   instance_type: Standard_E4s_v3
   instance_count: 1
-
-# NOTE:
-# - Check `python ml/promote.py --help` for the real gate CLI flags and adjust.
-# - The register step path assumes edgesense-azure/ sits beside edgesense-ai/
-#   inside the uploaded code snapshot; simplest is to copy register_model.py
-#   into edgesense-ai/ml/ and shorten the command.
