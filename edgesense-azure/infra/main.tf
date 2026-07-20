@@ -158,9 +158,11 @@ resource "azurerm_container_app" "broker" {
       # allow_anonymous stays true so the simulator/dashboard (no cred
       # support yet) keep working; the agent authenticates. Flip to false
       # once all clients pass credentials.
+      # chown: mosquitto_passwd writes the file 600 root:root, but mosquitto
+      # drops to the 'mosquitto' user and must be able to read it.
       command = ["/bin/sh", "-c"]
       args = [
-        "printf 'listener 1883 0.0.0.0\\nallow_anonymous true\\npassword_file /mosquitto/config/passwd\\n' > /mosquitto/config/mosquitto.conf && mosquitto_passwd -c -b /mosquitto/config/passwd agent \"$AGENT_PASSWORD\" && exec /usr/sbin/mosquitto -c /mosquitto/config/mosquitto.conf"
+        "printf 'listener 1883 0.0.0.0\\nallow_anonymous true\\npassword_file /mosquitto/config/passwd\\n' > /mosquitto/config/mosquitto.conf && mosquitto_passwd -c -b /mosquitto/config/passwd agent \"$AGENT_PASSWORD\" && chown mosquitto: /mosquitto/config/passwd && exec /usr/sbin/mosquitto -c /mosquitto/config/mosquitto.conf"
       ]
     }
   }
@@ -256,7 +258,7 @@ resource "azurerm_container_app" "agent" {
 
       env {
         name  = "EDGESENSE_BROKER"
-        value = "tcp://${azurerm_container_app.broker.ingress[0].fqdn}:1883"
+        value = "tcp://${azurerm_container_app.broker.name}:1883"
       }
       env {
         name  = "EDGESENSE_BROKER_USERNAME"
@@ -309,10 +311,9 @@ resource "azurerm_container_app" "simulator" {
       cpu    = 0.25
       memory = "0.5Gi"
 
-      env {
-        name  = "EDGESENSE_BROKER"
-        value = "tcp://${azurerm_container_app.broker.ingress[0].fqdn}:1883"
-      }
+      # simulate.py is configured via CLI args only (image CMD defaults to
+      # the compose hostname 'mosquitto', which doesn't resolve here).
+      args = ["--broker", azurerm_container_app.broker.name, "--port", "1883", "--machines", "3"]
     }
   }
 }
@@ -357,9 +358,14 @@ resource "azurerm_container_app" "dashboard" {
       cpu    = 0.5
       memory = "1Gi"
 
+      # app.py reads HOST/PORT separately (not the tcp:// URL form).
       env {
-        name  = "EDGESENSE_BROKER"
-        value = "tcp://${azurerm_container_app.broker.ingress[0].fqdn}:1883"
+        name  = "EDGESENSE_BROKER_HOST"
+        value = azurerm_container_app.broker.name
+      }
+      env {
+        name  = "EDGESENSE_BROKER_PORT"
+        value = "1883"
       }
     }
   }
