@@ -78,11 +78,10 @@ Grafana → GitHub API → serverless AML job. Idle cost: zero.
 
 ### Caveats
 
-- `retrain_job.yml` command flags for `promote.py` are a **best guess** —
-  check its actual CLI and adjust (marked in the file).
-- The job's `code:` snapshot path assumes `edgesense-azure/` sits beside
-  `edgesense-ai/`; simplest fix is copying `register_model.py` into the main
-  repo's `ml/`.
+- `retrain_job.yml` calls `ml/promote.py --candidate ml/model` — the gate's
+  actual CLI (see `python ml/promote.py --help` for thresholds/tolerance).
+- The job's `code:` snapshot is the repo root (`edgesense-azure/` lives inside
+  the repo); `register_model.py` sits in the repo's `ml/` next to `train.py`.
 - Serverless compute SKU (`Standard_E4s_v3`) bills per job-minute — a retrain
   costs cents. The weekly cron is a safety net; delete it if you want purely
   event-driven runs.

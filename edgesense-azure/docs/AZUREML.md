@@ -10,7 +10,7 @@ workspace**, and adds an optional **managed online endpoint** for the
 | File | Purpose |
 |---|---|
 | `infra/azureml.tf` | Workspace + its required storage/Key Vault/App Insights (reuses Phase-1 ACR + Log Analytics) |
-| `ml/register_model.py` | Logs the trained bundle to MLflow and registers a version, tagged with your manifest version + metrics |
+| `ml/register_model.py` (in the repo's `ml/`, next to `train.py`) | Logs the trained bundle to MLflow and registers a version, tagged with your manifest version + metrics |
 | `ml/deploy_endpoint.sh` | Creates the managed online endpoint + deployment (demo, then delete) |
 | `ml/deployment.yml`, `ml/score.py`, `ml/environment.yml` | The deployment spec and scoring entry |
 
@@ -39,8 +39,8 @@ export MLFLOW_TRACKING_URI=$(az ml workspace show -n edgesense-mlw \
 make train
 make promote             # champion/challenger gate — unchanged
 
-# 3) register the winning bundle
-python ml/register_model.py --bundle ../edgesense-ai/ml/model --promote
+# 3) register the winning bundle (from the repo root)
+python ml/register_model.py --bundle ml/model --promote
 
 # 4) (optional, costs money) managed endpoint demo
 ./ml/deploy_endpoint.sh edgesense-mlw edgesense-rg
