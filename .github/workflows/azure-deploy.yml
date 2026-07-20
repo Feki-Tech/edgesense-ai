@@ -12,7 +12,7 @@ name: Deploy to Azure Container Apps
 
 on:
   push:
-    branches: [main]
+    branches: [main, azure-mlops-phase1] # drop the feature branch after merge
   workflow_dispatch:
 
 permissions:
@@ -36,7 +36,11 @@ jobs:
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
       - name: Build & push images to ACR
+        # docker build on the runner + docker push, NOT `az acr build`:
+        # ACR Tasks is disabled on this subscription (TasksOperationsNotAllowed).
         run: |
+          acr_server="${{ vars.ACR_NAME }}.azurecr.io"
+          az acr login --name "${{ vars.ACR_NAME }}"
           # Context is the repo root for all services (inference bakes ml/ at build).
           for svc in \
             "edgesense-inference:inference/Dockerfile" \
@@ -45,9 +49,10 @@ jobs:
             "edgesense-dashboard:dashboard/Dockerfile"; do
             image="${svc%%:*}"; dockerfile="${svc#*:}"
             echo "Building $image:$IMAGE_TAG"
-            az acr build --registry "${{ vars.ACR_NAME }}" \
-              --image "$image:$IMAGE_TAG" \
-              --file "$dockerfile" .
+            docker build -t "$acr_server/$image:$IMAGE_TAG" \
+                         -t "$acr_server/$image:latest" \
+                         -f "$dockerfile" .
+            docker push --all-tags "$acr_server/$image"
           done
 
       - name: Roll Container Apps to new tag
@@ -61,6 +66,12 @@ jobs:
           )
           for app in "${!apps[@]}"; do
             image="${apps[$app]}"
+            # Bootstrap: before the first terraform apply the apps don't exist
+            # yet — skip instead of failing, Terraform creates them from :latest.
+            if ! az containerapp show -n "$app" -g "${{ vars.RESOURCE_GROUP }}" -o none 2>/dev/null; then
+              echo "$app does not exist yet, skipping (bootstrap run)"
+              continue
+            fi
             az containerapp update \
               --name "$app" \
               --resource-group "${{ vars.RESOURCE_GROUP }}" \
@@ -69,6 +80,10 @@ jobs:
 
       - name: Smoke check dashboard
         run: |
+          if ! az containerapp show -n edgesense-dashboard -g "${{ vars.RESOURCE_GROUP }}" -o none 2>/dev/null; then
+            echo "dashboard app not created yet (bootstrap run), skipping smoke check"
+            exit 0
+          fi
           url=$(az containerapp show -n edgesense-dashboard \
             -g "${{ vars.RESOURCE_GROUP }}" \
             --query properties.configuration.ingress.fqdn -o tsv)
