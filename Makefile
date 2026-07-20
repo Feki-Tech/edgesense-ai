@@ -2,7 +2,7 @@ VENV := .venv
 PY := $(VENV)/bin/python
 MACHINES ?= 10
 
-.PHONY: setup deps broker broker-down train export-onnx inference agent simulate dashboard smoke test snap stack stack-down stack-logs demo demo-offline eval fleet
+.PHONY: setup deps broker broker-down train promote export-onnx inference agent simulate dashboard smoke test snap stack stack-down stack-logs demo demo-offline eval fleet
 
 stack:
 	docker compose up -d --build
@@ -39,6 +39,9 @@ broker-down:
 
 train:
 	$(PY) ml/train.py
+
+promote:         ## champion/challenger gate (exit 0 = candidate may be promoted)
+	$(PY) ml/promote.py
 
 export-onnx:
 	$(PY) ml/export_onnx.py

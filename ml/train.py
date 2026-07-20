@@ -2,11 +2,17 @@
 
 Generates synthetic *normal* operating data (same distributions as the
 simulator's healthy regime), fits an IsolationForest pipeline and validates
-it against synthetic fault data. Saves the model to ml/model/model.joblib.
+it against synthetic fault data. Saves the model to ml/model/model.joblib
+plus a model.manifest.json (version, validation metrics, data hash) that
+downstream tooling (promotion gate, MLflow registration) reads.
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
+import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 
 import joblib
@@ -17,6 +23,19 @@ from sklearn.preprocessing import StandardScaler
 
 FEATURES = ["vibration", "temperature", "current"]
 MODEL_PATH = Path(__file__).parent / "model" / "model.joblib"
+MANIFEST_PATH = MODEL_PATH.with_name("model.manifest.json")
+
+
+def _git_short_rev() -> str:
+    # .git is absent inside container builds (.dockerignore) — degrade quietly.
+    try:
+        return subprocess.run(
+            ["git", "rev-parse", "--short=7", "HEAD"],
+            capture_output=True, text=True, timeout=5,
+            cwd=Path(__file__).parent, check=True,
+        ).stdout.strip()
+    except Exception:
+        return "nogit00"
 
 
 def normal_data(n: int, rng: np.random.Generator) -> np.ndarray:
@@ -71,6 +90,19 @@ def main() -> None:
     MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
     joblib.dump({"pipeline": model, "features": FEATURES, "z_guard": 6.0}, MODEL_PATH)
     print(f"model saved -> {MODEL_PATH}")
+
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d.%H%M%S")
+    manifest = {
+        "version": f"{stamp}+{_git_short_rev()}",
+        "features": FEATURES,
+        "metrics": {
+            "false_positive_rate": fp,
+            "fault_detection_rate": tp,
+        },
+        "training_data_hash": hashlib.sha256(x_train.tobytes()).hexdigest(),
+    }
+    MANIFEST_PATH.write_text(json.dumps(manifest, indent=2) + "\n")
+    print(f"manifest saved -> {MANIFEST_PATH}")
 
 
 if __name__ == "__main__":
