@@ -178,7 +178,7 @@ offline test with synthetic data, so CI never touches the network.
 |--------------|-------------------------------------------------------------------|
 | `simulator/` | Simulates machines publishing vibration / temperature / current over MQTT, with random or on-demand (control-topic) fault episodes. |
 | `ml/`        | Trains a small autoencoder on normal operating data (sklearn or PyTorch backend) → `ml/model/model.joblib` + manifest + model card (`manifest.py`); hybrid scoring (`scoring.py`); offline evaluation (`evaluate.py`); champion/challenger promotion gate (`promote.py`); ONNX export (`export_onnx.py`). |
-| `inference/` | FastAPI sidecar serving the model (`POST /score`), model/drift metrics (`GET /metrics`) and hot reload (`POST /reload`). |
+| `inference/` | FastAPI sidecar serving the model (`POST /score`), model/drift metrics (`GET /metrics`), hot reload (`POST /reload`) and challenger shadow scoring (`/shadow`, `/shadow/load`, `/shadow/unload`). |
 | `edge-agent/`| Go agent: subscribes to sensor topics, scores each reading, publishes anomaly events to the uplink (MQTT by default, CoAP optional) with store-and-forward buffering. |
 | `coap-receiver/` | Go CoAP→MQTT bridge for the constrained-link uplink: accepts CoAP POSTs of events and republishes them to the cloud broker (compose profile `coap`). |
 | `dashboard/` | Streamlit live dashboard: signals, anomaly markers, event feed.    |
@@ -246,8 +246,10 @@ Every trained bundle ships with a **manifest** (version
 snapshot) plus a sidecar `model.manifest.json` and a generated
 `MODEL_CARD.md`; `/healthz` reports the live `model_version`. New models
 only replace the served one through the **champion/challenger promotion
-gate** (`make promote`), and the sidecar hot-swaps bundles via `POST
-/reload` — see [`docs/MLOPS.md`](docs/MLOPS.md).
+gate** (`make promote`), the sidecar hot-swaps bundles via `POST /reload`,
+and a refused candidate can be **shadow-scored** on live traffic
+(`POST /shadow/load`) to gather online agreement evidence before the next
+promotion attempt — see [`docs/MLOPS.md`](docs/MLOPS.md).
 
 Compared head-to-head with the IsolationForest baseline (`ml/evaluate.py
 --model <bundle>`), the autoencoder lifts model-side detection on synthetic

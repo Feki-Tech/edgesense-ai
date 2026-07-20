@@ -161,15 +161,40 @@ The **`model-gate`** workflow (`.github/workflows/model-gate.yml`,
 candidate + report as a build artifact — models are never committed by CI,
 and the regular test jobs are untouched.
 
+### 2.5 Shadow scoring — online champion/challenger evidence
+
+The offline gate (§2.4) decides on synthetic held-out data; shadow scoring
+adds evidence from **live traffic**. `POST /shadow/load` loads a challenger
+bundle (`EDGESENSE_SHADOW_MODEL`, default `ml/model/candidate/model.joblib` —
+exactly where `promote.py` parks refused candidates) beside the champion.
+Every `/score` reading is then scored by both models; the champion alone
+answers the request, while the shadow's agreement is tracked:
+
+```bash
+curl -X POST localhost:8800/shadow/load
+curl localhost:8800/shadow
+# → {"active":true,"report":{"n":1841,"agree":1839,"shadow_only":2,
+#    "champion_only":0,"errors":0,"agreement_rate":0.99891,
+#    "score_mae":0.00021,"score_bias":-0.00004, …}}
+curl -X POST localhost:8800/shadow/unload   # stop; returns the final report
+```
+
+Guarantees: the shadow can never affect serving (its failures are counted in
+`errors` and the request completes on the champion); a champion hot-reload
+starts a fresh tracker so evidence is always per-champion; Prometheus mirrors
+the report (`edgesense_model_shadow_scored_total`,
+`…_shadow_disagreements_total{kind}`, `…_shadow_score_diff`,
+`…_shadow_errors_total`, `…_shadow_info`) for dashboards and alerting.
+
 ## 3. Phase 2+ outlook
 
 - **OTA model delivery to the edge** — ship promoted bundles to devices as
   signed artifacts (snap refresh or registry download), with signature
   verification before `/reload` per SECURITY.md §5/P4; the manifest's hash
   and version make the artifact verifiable end-to-end.
-- **Shadow scoring** — serve the champion while a challenger scores the same
-  readings in shadow; compare verdict streams on live traffic before
-  promotion (the gate then adds online evidence to the offline bar).
+- **Gate + shadow integration** — feed the shadow's live agreement report
+  (§2.5) back into `promote.py` as an additional promotion criterion, so the
+  offline bar is complemented by online evidence before rollout.
 - **Feedback loop & labeling** — capture operator confirm/dismiss verdicts
   on events, build a labeled corpus per machine, and feed it to evaluation
   (and eventually training) with the provenance recording the manifest
@@ -191,6 +216,6 @@ make train           # train + validate; writes bundle + manifest + model card
 make eval            # offline evaluation -> docs/EVALUATION.md
 make promote         # champion/challenger gate (see §2.4)
 make export-onnx     # ONNX graph + sidecar metadata
-make inference       # serve: POST /score · GET /healthz · GET /metrics · POST /reload
-pytest tests/test_manifest.py tests/test_drift.py tests/test_reload.py tests/test_promote.py
+make inference       # serve: POST /score · GET /healthz · GET /metrics · POST /reload · /shadow*
+pytest tests/test_manifest.py tests/test_drift.py tests/test_reload.py tests/test_promote.py tests/test_shadow.py
 ```
