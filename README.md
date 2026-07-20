@@ -5,19 +5,35 @@ sensors at the edge, ML inference on the node, and only *events* go upstream —
 even when the uplink is down.
 
 ```
-┌───────────┐ sensors  ┌────────────┐ /score  ┌────────────┐
-│ simulator │ ───────► │ edge-agent │ ──────► │ inference  │
-│ 3 machines│   MQTT   │    (Go)    │ ◄────── │ (FastAPI + │
-└───────────┘  (local  │ disk buffer│   HTTP  │  Isol.F.)  │
-      ▲        broker) └─────┬──────┘         └────────────┘
-      │                      │ anomaly events only · QoS 1
-      │ edgesense/control/   │ store-and-forward uplink
-      │ fault (demos)        ▼
-                      ┌──────────────┐       ┌────────────┐
-                      │ cloud broker │ ────► │ dashboard  │
-                      └──────────────┘       └────────────┘
+┌─ EDGE DEVICE (one per machine) ─────────────────────────────────┐
+│ ┌───────────┐ sensors  ┌────────────┐ /score  ┌────────────┐    │
+│ │ simulator │ ───────► │ edge-agent │ ──────► │ inference  │    │
+│ │ 3 machines│   MQTT   │    (Go)    │ ◄────── │ (FastAPI + │    │
+│ └───────────┘  (local  │ disk buffer│   HTTP  │  autoenc.) │    │
+│       ▲        broker) └─────┬──────┘         └────────────┘    │
+│       │ edgesense/control/   │ raw readings stay on the node    │
+│       │ fault (demos)        │ (~50 MB/day/machine)             │
+└──────────────────────────────┼──────────────────────────────────┘
+                               │ anomaly events only · QoS 1
+                               │ store-and-forward uplink
+                MQTT (default) │ CoAP/UDP (constrained/LTE,
+                      ┌────────┴────────┐        make stack-coap)
+                      ▼                 ▼       CLOUD / UPSTREAM
+               ┌──────────────┐  ┌───────────────┐
+               │ cloud broker │◄─│ coap-receiver │ (CoAP→MQTT bridge)
+               └──────┬───────┘  └───────────────┘
+                      ▼
+               ┌────────────┐
+               │ dashboard  │
+               └────────────┘
    agent /metrics ──► Prometheus ──► Grafana (provisioned dashboard)
 ```
+
+Everything inside the box lives on the edge device: the local broker, the
+scoring loop and the disk buffer (in production one node per machine — the
+snap packages exactly this; the Docker demo runs the same pieces as
+containers on one host, with the simulator standing in for real sensors).
+Only anomaly events and Prometheus scrapes cross the boundary.
 
 ## Use cases
 
@@ -25,8 +41,10 @@ even when the uplink is down.
   multiple long before it seizes. EdgeSense raises the alarm on the **first
   faulty reading (~0.5 s at 2 Hz)** — see the demo below.
 - **Thermal runaway protection** — overheat is a *single-feature* drift that
-  isolation forests systematically miss; the hybrid z-score guard catches it
-  immediately (that failure mode was found by this repo's own test suite).
+  isolation forests systematically missed (a failure mode found by this
+  repo's own test suite); the autoencoder's reconstruction error flags it on
+  the first reading, with the hybrid z-score guard as a certified hard
+  backstop.
 - **Overload / energy monitoring** — current excursions from jams or failing
   motors are flagged with a machine-readable `reason`, ready for maintenance
   ticketing.
@@ -45,15 +63,17 @@ even when the uplink is down.
 
 ```bash
 make stack        # build + start both brokers, inference, agent, simulator, dashboard
+make stack-coap   # same stack, but the agent uplinks over CoAP/UDP (see "CoAP uplink")
 make stack-logs   # follow logs
 make smoke        # end-to-end check from the host (needs `make setup` once)
-make stack-down   # stop everything
+make stack-down   # stop everything (either variant)
 ```
 
 - Dashboard: http://localhost:8501 · Grafana: http://localhost:3000 (no login)
 - Inference API: http://localhost:8800/healthz · Agent health/metrics: http://localhost:8890/healthz
-- Prometheus: http://localhost:9090
+- Prometheus: http://localhost:9090 · MCP server (streamable HTTP): http://localhost:8900/mcp
 - Local broker (sensors): localhost:11883 · Cloud broker (events): localhost:12883
+- With `make stack-coap`: CoAP receiver on udp/15683, its metrics on http://localhost:8891/healthz
 
 Scale the simulated fleet without touching anything else:
 
@@ -95,6 +115,9 @@ Inject your own faults while watching the dashboard:
 ```bash
 mosquitto_pub -p 11883 -t edgesense/control/fault \
   -m '{"machine_id": "machine-02", "fault": "overheat", "ticks": 30}'
+# namespaced layout: per-machine control topic
+mosquitto_pub -p 11883 -t es/default/default/machine-02/control \
+  -m '{"fault": "overheat", "ticks": 30}'
 ```
 
 ### 2. Uplink outage with zero event loss — `make demo-offline`
@@ -121,6 +144,10 @@ Watch it live in Grafana (http://localhost:3000): the uplink stat flips to
 DOWN, the buffer-depth panel climbs during the outage and snaps back to zero
 on replay.
 
+The same demo runs against the CoAP stack (`make stack-coap`) with
+`make demo-offline-coap` — it stops and restarts the CoAP receiver instead of
+the broker and asserts the identical zero-loss, no-duplicates outcome.
+
 ### 3. Offline model evaluation — `make eval`
 
 Replays the simulator's physics offline (25 episodes per fault, 20k healthy
@@ -132,18 +159,30 @@ readings) and writes [`docs/EVALUATION.md`](docs/EVALUATION.md):
 | overheat | 25/25 (100%) | 1 reading (~0.5 s) | 100% |
 | overload | 25/25 (100%) | 1 reading (~0.5 s) | 100% |
 
-False positives on healthy data: **0.48%** (the IsolationForest's tuned
-contamination budget).
+False positives on healthy data: **0.43%** (the autoencoder's calibrated
+false-alarm budget).
+
+### 4. Public-dataset benchmark — `make benchmark`
+
+Cross-checks the same architecture and calibration against real industrial
+data: it trains on the healthy rows of the [AI4I 2020 Predictive Maintenance
+dataset](https://archive.ics.uci.edu/dataset/601) (UCI, 10k milling readings,
+labeled failure modes) and writes per-failure-mode recall and ROC-AUC to
+[`docs/BENCHMARK.md`](docs/BENCHMARK.md). The CSV (~0.5 MB) is downloaded
+once into `ml/data/` (gitignored); the pipeline itself is covered by an
+offline test with synthetic data, so CI never touches the network.
 
 ## Components
 
 | Path         | Role                                                              |
 |--------------|-------------------------------------------------------------------|
 | `simulator/` | Simulates machines publishing vibration / temperature / current over MQTT, with random or on-demand (control-topic) fault episodes. |
-| `ml/`        | Trains an IsolationForest on normal operating data → `ml/model/model.joblib`; hybrid scoring (`scoring.py`); offline evaluation (`evaluate.py`); ONNX export (`export_onnx.py`). |
-| `inference/` | FastAPI sidecar serving the model (`POST /score`).                 |
-| `edge-agent/`| Go agent: subscribes to sensor topics, scores each reading, publishes anomaly events to the uplink broker with store-and-forward buffering. |
+| `ml/`        | Trains a small autoencoder on normal operating data (sklearn or PyTorch backend) → `ml/model/model.joblib` + manifest + model card (`manifest.py`); hybrid scoring (`scoring.py`); offline evaluation (`evaluate.py`); champion/challenger promotion gate (`promote.py`); ONNX export (`export_onnx.py`). |
+| `inference/` | FastAPI sidecar serving the model (`POST /score`), model/drift metrics (`GET /metrics`) and hot reload (`POST /reload`). |
+| `edge-agent/`| Go agent: subscribes to sensor topics, scores each reading, publishes anomaly events to the uplink (MQTT by default, CoAP optional) with store-and-forward buffering. |
+| `coap-receiver/` | Go CoAP→MQTT bridge for the constrained-link uplink: accepts CoAP POSTs of events and republishes them to the cloud broker (compose profile `coap`). |
 | `dashboard/` | Streamlit live dashboard: signals, anomaly markers, event feed.    |
+| `mcp_server/`| MCP (Model Context Protocol) server exposing the stack as tools for AI assistants/agents. |
 | `scripts/`   | Self-verifying demos (`demo.py`, `demo_offline.py`) and smoke test. |
 | `deploy/`    | Mosquitto config, Prometheus scrape config, Grafana provisioning (datasource + fleet dashboard). |
 | `snap/`      | Snapcraft packaging for the edge agent (Ubuntu Core ready).        |
@@ -153,6 +192,13 @@ an internal network with two brokers: `mosquitto` (local sensor bus) and
 `mosquitto-cloud` (stand-in for a remote event broker).
 
 ## Quickstart (local processes)
+
+Prerequisites:
+
+- Python 3.12+
+- Docker (for the brokers / full stack)
+- Go 1.22+ — only for running the agent locally (`make agent`, `make test`); `make setup` skips the Go deps with a warning if Go is missing
+- `mosquitto-clients` (optional, for manual fault injection)
 
 ```bash
 make setup        # venv + python deps (incl. dev) + go deps
@@ -173,11 +219,43 @@ sensors and events — the demos and dashboard handle both layouts.
 
 ## Anomaly detection
 
-Scoring is hybrid (`ml/scoring.py`): a reading is anomalous if the
-IsolationForest flags it **or** any feature deviates more than `z_guard`
-(default 6σ) from the training distribution. The guard catches single-feature
-outliers (e.g. pure overheat) that isolation forests systematically miss.
-Responses carry a `reason` field: `model`, `limit`, or `model+limit`.
+The model is a small autoencoder (3 → 16 → 2 → 16 → 3, tanh) trained on
+healthy operating data only. Healthy readings pass through the 2-unit
+bottleneck almost unchanged; faults don't, so the mean squared reconstruction
+error in scaled feature space is the anomaly score (**higher = more
+anomalous**). The alarm threshold is calibrated on held-out healthy data at
+the 99.5% quantile (~0.5% false-alarm budget). Two interchangeable training
+backends emit the exact same bundle format — raw numpy weights, so inference
+needs neither torch nor a fitted sklearn estimator:
+
+```bash
+make train                                      # sklearn MLPRegressor (default; CI + Docker)
+.venv/bin/python ml/train.py --backend torch    # PyTorch (pip install -r requirements-torch.txt; CUDA if available)
+.venv/bin/python ml/train.py --model iforest    # legacy IsolationForest baseline, for comparison
+```
+
+Scoring stays hybrid (`ml/scoring.py`): a reading is anomalous if the
+reconstruction error exceeds the calibrated threshold **or** any feature
+deviates more than `z_guard` (default 6σ) from the training distribution.
+The guard is the certified hard limit for single-feature drift and a
+backstop for anything the model might learn to reconstruct. Responses carry
+a `reason` field: `model`, `limit`, or `model+limit`.
+
+Every trained bundle ships with a **manifest** (version
+`{YYYYMMDD.HHMMSS}+{git7}`, training config, training-data hash, metrics
+snapshot) plus a sidecar `model.manifest.json` and a generated
+`MODEL_CARD.md`; `/healthz` reports the live `model_version`. New models
+only replace the served one through the **champion/challenger promotion
+gate** (`make promote`), and the sidecar hot-swaps bundles via `POST
+/reload` — see [`docs/MLOPS.md`](docs/MLOPS.md).
+
+Compared head-to-head with the IsolationForest baseline (`ml/evaluate.py
+--model <bundle>`), the autoencoder lifts model-side detection on synthetic
+faults from ~61% to 100% of faulty readings at a slightly lower
+false-positive rate — every alarm now carries the model's signature instead
+of leaning on the limit guard. On real industrial data the same pipeline
+separates labeled failure modes that per-feature limits cannot see at all —
+see [`docs/BENCHMARK.md`](docs/BENCHMARK.md).
 
 ## Store-and-forward
 
@@ -187,6 +265,8 @@ JSON Lines, capped at 10k entries, oldest dropped first) and flushed on
 reconnect plus every 30 s. The disk buffer is the single owner of offline
 events (publishes are gated on a live connection), so replay is duplicate-free.
 Events survive agent restarts. `make demo-offline` proves all of this live.
+The semantics are identical for both uplink transports — the CoAP uplink
+buffers and replays exactly the same way (`make demo-offline-coap`).
 
 ### Agent configuration
 
@@ -194,10 +274,63 @@ Events survive agent restarts. `make demo-offline` proves all of this live.
 |---|---|---|
 | `EDGESENSE_BROKER` | `tcp://localhost:11883` | local broker (sensor bus) |
 | `EDGESENSE_UPLINK_BROKER` | = `EDGESENSE_BROKER` | broker events are published to |
+| `EDGESENSE_UPLINK_URL` | = `EDGESENSE_UPLINK_BROKER` | uplink transport by scheme: `coap://host:port` → CoAP/UDP, anything else (`tcp://`, `ssl://`, `ws://`) → MQTT |
 | `EDGESENSE_INFERENCE_URL` | `http://localhost:8800/score` | scoring sidecar |
-| `EDGESENSE_SENSOR_TOPIC` | `edgesense/sensors/#` | subscription filter |
+| `EDGESENSE_SENSOR_TOPIC` | `edgesense/sensors/#` (legacy) / `es/<org>/<site>/+/sensors/#` (namespaced) | subscription filter |
 | `EDGESENSE_BUFFER` | `event-buffer.jsonl` | store-and-forward file |
 | `EDGESENSE_METRICS_ADDR` | `:8890` | Prometheus metrics + healthz listener |
+| `EDGESENSE_ORG` | *(unset)* | tenant org — setting this (or `EDGESENSE_SITE`) switches to the namespaced topic layout |
+| `EDGESENSE_SITE` | *(unset)* | tenant site — see `EDGESENSE_ORG` |
+| `EDGESENSE_BROKER_USERNAME` / `_PASSWORD` | *(unset)* | credentials for the local broker (anonymous when unset) |
+| `EDGESENSE_UPLINK_USERNAME` / `_PASSWORD` | *(unset)* | credentials for the uplink broker (anonymous when unset) |
+
+## CoAP uplink (constrained/LTE links)
+
+MQTT rides on TCP: a connection handshake, per-connection state and periodic
+keepalives — cheap on ethernet, costly on NB-IoT/LTE-M, satellite or other
+high-latency, lossy, pay-per-byte links. For those, the agent can uplink over
+**CoAP** (RFC 7252) instead: UDP with a 4-byte header, no
+handshake/keepalive, and confirmable (CON) messages that retransmit until
+ACKed — the same at-least-once guarantee as MQTT QoS 1.
+
+```bash
+EDGESENSE_UPLINK_URL=coap://coap-receiver:5683   # scheme picks the transport
+```
+
+- Each event is a CON `POST /events` encoded as **CBOR** (Content-Format 60,
+  ~35% smaller than JSON for these numeric-heavy payloads); the receiver also
+  accepts JSON (Content-Format 50) so any stock CoAP CLI can inject events.
+- The cloud-side **`coap-receiver`** bridges back to MQTT: it validates each
+  event and republishes it (QoS 1) to `edgesense/events/<machine_id>` on the
+  cloud broker — dashboard, Grafana and demos work identically for both
+  transports. It ACKs 2.04 only after the broker's PUBACK, replies 5.03 while
+  the broker is down (the agent keeps buffering), and 4.00 for malformed
+  payloads.
+- **"Connected" without a connection**: UDP has no link state, so the agent
+  derives it from outcomes — any successful exchange (POST 2.xx, or the
+  4-byte CoAP ping the prober sends every 3 s when idle) marks the uplink up;
+  a timed-out exchange marks it down and events buffer to disk exactly as
+  with MQTT. `edgesense_uplink_connected` and `/healthz` reflect this for
+  both transports.
+- Everything stays in the same store-and-forward envelope: outage → disk
+  FIFO, recovery → duplicate-free FIFO replay with original timestamps.
+
+Try it: `make stack-coap` (compose profile `coap`, agent pointed at the
+receiver), then `make demo-offline-coap` for the outage/replay proof — it
+stops the receiver instead of the broker.
+
+### CoAP receiver configuration
+
+| Env var | Default | Purpose |
+|---|---|---|
+| `EDGESENSE_COAP_LISTEN` | `:5683` | CoAP/UDP listen address |
+| `EDGESENSE_UPLINK_BROKER` | `tcp://localhost:12883` | cloud broker to republish to |
+| `EDGESENSE_METRICS_ADDR` | `:8891` | Prometheus metrics + healthz listener |
+
+The receiver exports `edgesense_coap_events_received_total`,
+`…_republished_total`, `…_rejected_total`, `…_republish_failures_total` and
+`edgesense_coap_broker_connected` on `/metrics` (Prometheus scrapes it when
+the `coap` profile is up); `/healthz` reports its broker connection.
 
 ## Observability
 
@@ -214,26 +347,81 @@ The agent exposes its operational state on `EDGESENSE_METRICS_ADDR`:
 | `edgesense_events_published_total` | counter | events delivered upstream (incl. replays) |
 | `edgesense_events_buffered_total` | counter | events written to the disk buffer |
 | `edgesense_buffer_depth` | gauge | events currently waiting on disk |
-| `edgesense_uplink_connected` | gauge | 1 while the uplink connection is open |
+| `edgesense_uplink_connected` | gauge | 1 while the uplink is healthy (MQTT: connection open; CoAP: last exchange/probe succeeded) |
 | `edgesense_inference_latency_seconds` | histogram | scoring round-trip latency |
 
-The compose stack ships Prometheus (scraping the agent every 5 s) and Grafana
-with an auto-provisioned **EdgeSense AI — fleet & agent** dashboard
-(anonymous access, no login): uplink status, buffer depth, per-machine
-reading/anomaly rates, and p50/p95 inference latency. `make demo-offline`
-asserts against these metrics — the buffer-depth gauge must drain to zero
-after the replay.
+The inference sidecar exposes its own `GET /metrics` on port 8800
+([`docs/MLOPS.md`](docs/MLOPS.md)):
+
+| Metric | Type | Meaning |
+|---|---|---|
+| `edgesense_model_scored_total` | counter | readings scored by the sidecar |
+| `edgesense_model_anomalies_total{reason}` | counter | flagged readings by trigger |
+| `edgesense_model_score` | histogram | anomaly-score distribution |
+| `edgesense_model_drift_zshift{feature}` | gauge | rolling-mean shift vs the training mean (in training σ) |
+| `edgesense_model_drift_psi{feature}` | gauge | PSI of the rolling window vs the training distribution |
+| `edgesense_model_info{model_version,…}` | gauge | live model metadata |
+| `edgesense_model_reloads_total{result}` | counter | hot-reload attempts |
+
+The compose stack ships Prometheus (scraping the agent and the inference
+sidecar every 5 s) and Grafana with an auto-provisioned **EdgeSense AI —
+fleet & agent** dashboard (anonymous access, no login): uplink status,
+buffer depth, per-machine reading/anomaly rates, p50/p95 inference latency,
+per-feature drift (PSI + z-shift) and the live model version — plus a
+provisioned alert that fires when any feature's PSI stays above 0.2 for
+10 minutes. `make demo-offline` asserts against these metrics — the
+buffer-depth gauge must drain to zero after the replay.
+
+## MCP server
+
+`mcp_server/` exposes the stack to MCP (Model Context Protocol) clients —
+Claude Desktop, IDE assistants, agent frameworks — so an AI assistant can
+poke the fleet directly:
+
+| Tool | Backed by |
+|---|---|
+| `score_reading(vibration, temperature, current)` | inference `POST /score` |
+| `get_inference_health()` | inference `GET /healthz` |
+| `inject_fault(machine_id, fault, ticks)` | MQTT `edgesense/control/fault` (same payload as the demos) |
+| `list_recent_events(limit, machine_id)` | MQTT `edgesense/events/#` on the uplink broker |
+| `get_fleet_metrics()` | Prometheus (readings/s, anomaly rate, buffer depth, uplink status) |
+
+Run on stdio for local MCP clients (`make mcp`), or as part of the Docker
+stack, where it serves streamable HTTP on http://localhost:8900/mcp
+(`make stack` starts it automatically). Brokers, inference and Prometheus
+are resolved via the same `EDGESENSE_*` env vars and defaults as the other
+host-side tooling (see `mcp_server/server.py`).
+
+Example client config (stdio):
+
+```json
+{
+  "mcpServers": {
+    "edgesense": {
+      "command": "/path/to/edgesense-ai/.venv/bin/python",
+      "args": ["/path/to/edgesense-ai/mcp_server/server.py"]
+    }
+  }
+}
+```
+
+Ask the assistant to *"inject an overheat on machine-02 and tell me when the
+alarm fires"* — it publishes the fault, tails `list_recent_events` and reads
+`get_fleet_metrics` while the dashboard shows the episode live.
 
 ## ONNX export
 
 ```bash
-make export-onnx   # -> ml/model/model.onnx + model.onnx.json (scaler + guard params)
+make export-onnx   # -> ml/model/model.onnx + model.onnx.json (scaler + guard + threshold)
 ```
 
-`tests/test_onnx.py` asserts parity between onnxruntime and sklearn
-(score MAE < 1e-3, label agreement > 99%). The exported model plus the
-sidecar-free metadata file are the path to running inference directly in the
-Go agent (roadmap).
+The exported graph (~2 KiB) is self-contained: scaler, autoencoder weights
+and the calibrated alarm threshold are baked in as constants — raw features
+in, reconstruction-error score and 0/1 anomaly label out.
+`tests/test_onnx.py` asserts parity between onnxruntime and the numpy scorer
+(relative score MAE < 1e-3, label agreement > 99%). The exported model plus
+the sidecar-free metadata file are the path to running inference directly in
+the Go agent (roadmap).
 
 ## Snap packaging
 
@@ -250,26 +438,132 @@ sudo snap install ./edgesense-agent_0.1.0_amd64.snap --dangerous
 ## Testing & CI
 
 ```bash
-make test         # pytest (model quality, API, simulator, evaluation, ONNX parity) + go test
+make test         # pytest (model quality, API, simulator, evaluation, ONNX parity, benchmark pipeline, optional torch backend) + go test (agent + coap-receiver)
 ```
 
 GitHub Actions (`.github/workflows/ci.yml`) runs both suites on every push
-and pull request: a Python 3.12 job (`pytest`) and a Go 1.22 job
-(`go vet`, `go build`, `go test`).
+and pull request: a Python 3.12 job (`pytest`) and a Go 1.22 job matrix over
+both modules — `edge-agent` and `coap-receiver` (`go vet`, `go build`,
+`go test`; the CoAP tests run an in-process UDP server, no external
+services). A separate manually-dispatched **model-gate** workflow
+(`.github/workflows/model-gate.yml`) runs the champion/challenger promotion
+gate on CPU and uploads the candidate bundle + report as an artifact — see
+[`docs/MLOPS.md`](docs/MLOPS.md).
 
 ## MQTT topics & ports
 
 Host ports: local broker **11883**, cloud broker **12883** (1883 sits in a
-Windows/Hyper-V reserved port range when running under WSL2 + Docker Desktop).
+Windows/Hyper-V reserved port range when running under WSL2 + Docker Desktop);
+CoAP receiver (profile `coap`) **udp/15683**, its metrics on **8891**.
 
-- `edgesense/sensors/<machine_id>` — raw readings (JSON), ~2 Hz per machine (local broker)
-- `edgesense/events/<machine_id>` — anomaly events only (JSON, with score + reason; uplink broker)
-- `edgesense/control/fault` — on-demand fault injection for demos (local broker)
+Two topic layouts exist ([`docs/PLATFORM.md`](docs/PLATFORM.md) §4.4). The
+**legacy** flat layout is the default; the **namespaced** tenant layout switches
+on when `EDGESENSE_ORG` and/or `EDGESENSE_SITE` are set (an unset one defaults
+to `default`) — on the agent, simulator, dashboard and demo scripts alike.
+
+| Purpose | Legacy (default) | Namespaced (`EDGESENSE_ORG`/`EDGESENSE_SITE` set) |
+|---|---|---|
+| raw readings (JSON, ~2 Hz per machine; local broker) | `edgesense/sensors/<machine>` | `es/<org>/<site>/<machine>/sensors` |
+| anomaly events (JSON with score + reason; uplink broker) | `edgesense/events/<machine>` | `es/<org>/<site>/<machine>/events` |
+| fault injection for demos (local broker) | `edgesense/control/fault` (global) | `es/<org>/<site>/<machine>/control` (per machine) |
+
+The demo stack (`make stack` / `make demo` / `make demo-offline` / `make smoke`)
+runs the legacy layout on anonymous brokers — nothing to configure. To run the
+same demos on the namespaced layout:
+
+```bash
+docker compose down && EDGESENSE_ORG=default EDGESENSE_SITE=default docker compose up -d --build
+EDGESENSE_ORG=default EDGESENSE_SITE=default python scripts/demo.py
+```
+
+## Secured uplink broker (opt-in)
+
+`docker-compose.secure.yml` swaps the cloud broker for an **authenticated**
+one (`deploy/secure/`): `allow_anonymous false`, a password file and per-device
+ACLs so a device credential can publish only under its own topic prefix —
+platform phase 1 of [`docs/PLATFORM.md`](docs/PLATFORM.md) §4.2/§7. The local
+sensor bus stays anonymous (it is machine-local by design).
+
+```bash
+make stack-secure   # legacy stack + namespaced topics + authenticated uplink
+make check-acl      # prove per-device topic isolation against the live broker
+make stack-secure-down
+```
+
+Demo credentials (checked in, **demo only** — regenerate for anything real
+with `python scripts/gen_broker_auth.py`):
+
+| Username | Password | ACL |
+|---|---|---|
+| `default/default/machine-01` (…`-02`, `-03`) | `machine-01-demo-pw` … | write own `…/sensors/#` + `…/events`, read own `…/control` |
+| `acme/lyon/pump-07` | `pump-07-demo-pw` | same, under `es/acme/lyon/pump-07/…` (foreign-org fixture) |
+| `gw@default/default` | `gateway-demo-pw` | site gateway: write `es/default/default/+/events` (used by the compose agent, which scores all site machines over one connection) |
+| `ops` | `ops-demo-pw` | read `es/+/+/+/events`, write `es/+/+/+/control` (dashboard + demo listeners) |
+
+`make check-acl` (= `scripts/check_acl.py`) proves the acceptance criterion
+live: a device's own-prefix publish is delivered, publishes to a foreign org's
+or a sibling machine's prefix are **denied** (MQTT v5 `Not authorized` PUBACK,
+cross-checked by an observer seeing nothing arrive), foreign control
+subscriptions are denied, and bad/anonymous logins are rejected.
+
+Run the full demos against the secured stack:
+
+```bash
+make stack-secure
+EDGESENSE_ORG=default EDGESENSE_SITE=default \
+EDGESENSE_UPLINK_USERNAME=ops EDGESENSE_UPLINK_PASSWORD=ops-demo-pw \
+python scripts/demo.py        # same for scripts/demo_offline.py, scripts/smoke.py
+```
+
+Notes:
+
+- **Mosquitto pattern ACLs don't work with `/` in usernames** (verified on
+  mosquitto 2.x): `pattern write es/%u/events` denies even the device's own
+  publish when the username is `org/site/machine`. The ACL file therefore uses
+  generated per-device `user` blocks (registry-style — the same shape the
+  phase-2 device registry will manage via the dynamic-security plugin);
+  `scripts/gen_broker_auth.py` regenerates `deploy/secure/{acl,passwd}`.
+- **TLS is deferred** to the mTLS phase: production uplinks should enable the
+  commented `listener 8883` TLS block in `deploy/secure/mosquitto.conf`;
+  password auth without TLS is only acceptable on trusted demo networks.
 
 ## Ideas / roadmap
 
-- Run ONNX inference inside the Go agent (onnxruntime bindings), drop the sidecar
-- Replace IsolationForest with an autoencoder for richer fault signatures
-- CoAP uplink for constrained/LTE links
-- Alerting: Grafana alert rules on buffer depth / uplink downtime
-- Inference service as a second snap; model updates as snap refreshes
+- [ ] Run ONNX inference inside the Go agent (onnxruntime bindings), drop the sidecar
+- [x] Replace IsolationForest with an autoencoder for richer fault signatures
+- [x] CoAP uplink for constrained/LTE links
+- [x] MLOps phase 1: model manifest & versioning, serving-side drift metrics, hot reload, champion/challenger promotion gate ([`docs/MLOPS.md`](docs/MLOPS.md))
+- [ ] Alerting: Grafana alert rules on buffer depth / uplink downtime (drift alert shipped with MLOps phase 1)
+- [ ] Inference service as a second snap; model updates as snap refreshes
+- [ ] MLOps phase 2: OTA model delivery with signature verification, shadow scoring, feedback/labeling loop, per-machine thresholds, model registry (outlook in [`docs/MLOPS.md`](docs/MLOPS.md))
+
+## Platform vision
+
+[`docs/PLATFORM.md`](docs/PLATFORM.md) is the design document for growing this demo into
+a multi-user platform — tenancy (org → site → machine), RBAC, per-device identity
+(broker ACLs → mTLS), namespaced topics, a device registry, and a scalability analysis
+for 1000s of devices. [`docs/GLOSSARY.md`](docs/GLOSSARY.md) defines every domain term
+used by the repo and the design.
+
+[`docs/SECURITY.md`](docs/SECURITY.md) is the security chapter: an honest current-state
+assessment, a STRIDE + ML threat model, data/application/device security, and a phased hardening roadmap.
+
+[`docs/MLOPS.md`](docs/MLOPS.md) is the MLOps chapter: the model lifecycle
+(train → calibrate → bake → serve), phase 1 (manifest & versioning, drift
+detection, hot reload, promotion gate) and the phase-2+ outlook (OTA model
+delivery, shadow scoring, feedback loop, registry).
+
+[`docs/HARDWARE.md`](docs/HARDWARE.md) is the hardware chapter: replacing the simulator
+with real sensors on real machines — edge compute tiers, sensor selection, signal
+conditioning for the 2 Hz reading contract, BOMs, and the hardware team charter.
+
+## References
+
+- M. Feki, *Data Quality Model for Synthetic Image Data in Production*,
+  Master's thesis, Technische Universität Berlin, Computer Vision & Remote
+  Sensing — the author's related work on data quality for ML in production,
+  which motivates the healthy-data-quality-first approach used here (train on
+  verified healthy data only, calibrate the alarm budget on held-out data).
+- S. Matzka, *AI4I 2020 Predictive Maintenance Dataset*, UCI Machine Learning
+  Repository, 2020. <https://archive.ics.uci.edu/dataset/601> (CC BY 4.0) —
+  used by `make benchmark` ([`docs/BENCHMARK.md`](docs/BENCHMARK.md)).

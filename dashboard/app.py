@@ -3,6 +3,11 @@
 Subscribes to sensor readings (local broker) and anomaly events (uplink
 broker — same as local unless EDGESENSE_UPLINK_HOST/PORT differ) over MQTT
 and renders live signal plots with anomaly markers plus an event feed.
+
+Topic layout follows EDGESENSE_ORG/EDGESENSE_SITE: unset → legacy flat
+topics; set → tenant-namespaced `es/<org>/<site>/…` (PLATFORM.md §4.4).
+EDGESENSE_UPLINK_USERNAME/_PASSWORD authenticate against a secured uplink
+broker.
 """
 
 from __future__ import annotations
@@ -24,23 +29,44 @@ BROKER = os.environ.get("EDGESENSE_BROKER_HOST", "localhost")
 PORT = int(os.environ.get("EDGESENSE_BROKER_PORT", "11883"))
 UPLINK = os.environ.get("EDGESENSE_UPLINK_HOST", BROKER)
 UPLINK_PORT = int(os.environ.get("EDGESENSE_UPLINK_PORT", str(PORT)))
+UPLINK_AUTH = (os.environ.get("EDGESENSE_UPLINK_USERNAME"),
+               os.environ.get("EDGESENSE_UPLINK_PASSWORD", ""))
+ORG = os.environ.get("EDGESENSE_ORG")
+SITE = os.environ.get("EDGESENSE_SITE")
+if ORG or SITE:
+    _PREFIX = f"es/{ORG or 'default'}/{SITE or 'default'}"
+    SENSOR_TOPICS = [f"{_PREFIX}/+/sensors/#"]
+    EVENT_TOPICS = [f"{_PREFIX}/+/events"]
+else:
+    SENSOR_TOPICS = ["edgesense/sensors/#"]
+    EVENT_TOPICS = ["edgesense/events/#"]
 MAX_POINTS = 600
 SIGNALS = ["vibration", "temperature", "current"]
+
+
+def is_reading_topic(topic: str) -> bool:
+    """True for sensor-reading topics in either layout (else: event)."""
+    parts = topic.split("/")
+    if parts[0] == "es":
+        return len(parts) >= 5 and parts[4] == "sensors"
+    return len(parts) >= 2 and parts[1] == "sensors"
 
 
 class Collector:
     """Background MQTT subscriber accumulating readings and events."""
 
-    def __init__(self, endpoints: list[tuple[str, int, list[str]]]) -> None:
+    def __init__(self, endpoints: list[tuple[str, int, list[str], tuple | None]]) -> None:
         self.lock = threading.Lock()
         self.readings: dict[str, deque] = defaultdict(lambda: deque(maxlen=MAX_POINTS))
         self.events: deque = deque(maxlen=200)
         self.clients: list[mqtt.Client] = []
 
-        for i, (host, port, topics) in enumerate(endpoints):
+        for i, (host, port, topics, auth) in enumerate(endpoints):
             client = mqtt.Client(
                 mqtt.CallbackAPIVersion.VERSION2,
                 client_id=f"edgesense-dashboard-{i}-{int(time.time())}")
+            if auth and auth[0]:
+                client.username_pw_set(auth[0], auth[1])
             client.on_connect = self._make_on_connect(topics)
             client.on_message = self._on_message
             client.connect(host, port)
@@ -59,7 +85,7 @@ class Collector:
         except json.JSONDecodeError:
             return
         with self.lock:
-            if msg.topic.startswith("edgesense/sensors/"):
+            if is_reading_topic(msg.topic):
                 self.readings[payload.get("machine_id", "?")].append(payload)
             else:
                 self.events.appendleft(payload)
@@ -74,10 +100,10 @@ class Collector:
 @st.cache_resource
 def get_collector() -> Collector:
     if (BROKER, PORT) == (UPLINK, UPLINK_PORT):
-        endpoints = [(BROKER, PORT, ["edgesense/sensors/#", "edgesense/events/#"])]
+        endpoints = [(BROKER, PORT, SENSOR_TOPICS + EVENT_TOPICS, UPLINK_AUTH)]
     else:
-        endpoints = [(BROKER, PORT, ["edgesense/sensors/#"]),
-                     (UPLINK, UPLINK_PORT, ["edgesense/events/#"])]
+        endpoints = [(BROKER, PORT, SENSOR_TOPICS, None),
+                     (UPLINK, UPLINK_PORT, EVENT_TOPICS, UPLINK_AUTH)]
     return Collector(endpoints)
 
 

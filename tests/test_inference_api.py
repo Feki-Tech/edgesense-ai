@@ -20,6 +20,7 @@ def test_healthz(client: TestClient) -> None:
     body = client.get("/healthz").json()
     assert body["status"] == "ok"
     assert body["features"] == ["vibration", "temperature", "current"]
+    assert body["model_kind"] == "autoencoder"
 
 
 def test_score_healthy_reading(client: TestClient) -> None:
@@ -27,7 +28,7 @@ def test_score_healthy_reading(client: TestClient) -> None:
     assert resp.status_code == 200
     body = resp.json()
     assert body["is_anomaly"] is False
-    assert body["score"] > 0
+    assert body["score"] >= 0  # reconstruction error is non-negative
 
 
 def test_score_faulty_reading(client: TestClient) -> None:
@@ -36,6 +37,7 @@ def test_score_faulty_reading(client: TestClient) -> None:
     body = resp.json()
     assert body["is_anomaly"] is True
     assert body["reason"] in ("model", "limit", "model+limit")
+    assert body["score"] > 0  # higher = more anomalous
 
 
 def test_single_feature_outlier_flagged_by_guard(client: TestClient) -> None:

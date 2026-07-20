@@ -29,9 +29,22 @@ import paho.mqtt.client as mqtt
 BROKER = os.environ.get("EDGESENSE_BROKER_HOST", "localhost")
 PORT = int(os.environ.get("EDGESENSE_BROKER_PORT", "11883"))
 UPLINK_PORT = int(os.environ.get("EDGESENSE_UPLINK_PORT", "12883"))
+UPLINK_USERNAME = os.environ.get("EDGESENSE_UPLINK_USERNAME")
+UPLINK_PASSWORD = os.environ.get("EDGESENSE_UPLINK_PASSWORD", "")
 CLOUD_CONTAINER = os.environ.get("EDGESENSE_CLOUD_CONTAINER", "edgesense-mosquitto-cloud")
 METRICS_URL = os.environ.get("EDGESENSE_METRICS_URL", "http://localhost:8890/metrics")
-CONTROL_TOPIC = "edgesense/control/fault"
+
+# topic layout (PLATFORM.md §4.4): legacy flat topics by default, tenant-
+# namespaced es/<org>/<site>/… when EDGESENSE_ORG/EDGESENSE_SITE are set
+ORG = os.environ.get("EDGESENSE_ORG")
+SITE = os.environ.get("EDGESENSE_SITE")
+NAMESPACED = bool(ORG or SITE)
+PREFIX = f"es/{ORG or 'default'}/{SITE or 'default'}"
+EVENT_FILTER = f"{PREFIX}/+/events" if NAMESPACED else "edgesense/events/#"
+
+
+def control_topic(machine: str) -> str:
+    return f"{PREFIX}/{machine}/control" if NAMESPACED else "edgesense/control/fault"
 
 
 def docker(*args: str) -> subprocess.CompletedProcess:
@@ -90,12 +103,29 @@ def main() -> int:
         return 1
 
     log = EventLog()
+    # Durable session (fixed client id + clean_session=False) with a QoS 1
+    # subscription: after the broker restart the replayed events queue at the
+    # broker until this listener reconnects, so delivery doesn't race the
+    # listener's detection of the restart (Docker Desktop's port proxy can
+    # keep the old socket alive until the keepalive timeout). First purge any
+    # stale session state from a previous run, then connect durable.
+    purge = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2,
+                        client_id="edgesense-offline-demo", clean_session=True)
+    if UPLINK_USERNAME:
+        purge.username_pw_set(UPLINK_USERNAME, UPLINK_PASSWORD)
+    try:
+        purge.connect(BROKER, UPLINK_PORT)
+        purge.disconnect()
+    except OSError:
+        pass  # broker down: main listener's connect will report it
     listener = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2,
-                           client_id="edgesense-offline-demo")
+                           client_id="edgesense-offline-demo", clean_session=False)
+    if UPLINK_USERNAME:
+        listener.username_pw_set(UPLINK_USERNAME, UPLINK_PASSWORD)
     listener.on_message = log.on_message
-    listener.on_connect = lambda c, *_: c.subscribe("edgesense/events/#")
+    listener.on_connect = lambda c, *_: c.subscribe(EVENT_FILTER, qos=1)
     listener.reconnect_delay_set(1, 3)
-    listener.connect(BROKER, UPLINK_PORT)
+    listener.connect(BROKER, UPLINK_PORT, keepalive=10)
     listener.loop_start()
 
     control = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2,
@@ -105,7 +135,7 @@ def main() -> int:
     time.sleep(1)
 
     def inject(machine: str, fault: str, ticks: int) -> None:
-        control.publish(CONTROL_TOPIC, json.dumps(
+        control.publish(control_topic(machine), json.dumps(
             {"machine_id": machine, "fault": fault, "ticks": ticks}))
 
     print("=== EdgeSense AI — uplink outage / store-and-forward demo ===\n")

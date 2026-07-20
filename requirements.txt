@@ -4,8 +4,10 @@ scikit-learn
 joblib
 fastapi
 uvicorn[standard]
+prometheus_client
 paho-mqtt>=2.0
 streamlit
 streamlit-autorefresh
 plotly
 requests
+mcp>=1.8

@@ -10,18 +10,22 @@ experiment_name: edgesense-continuous-training
 description: >
   Drift-triggered retraining: train a challenger on fresh healthy data,
   run the champion/challenger promotion gate, and register the winner
-  (champion alias) or park it (challenger alias) in the MLflow registry.
+  as champion or park it as challenger (role tags) in the MLflow registry.
 
 code: ../..   # repo root (this file lives at edgesense-azure/ml/ inside the repo)
 
+# promote.py trains the challenger, replays the offline evaluation harness on
+# challenger + current champion, and exits 0 (promoted -> ml/model is the new
+# champion), 1 (refused -> candidate parked in --out-dir), or 2 (error).
 command: >-
   pip install -r requirements.txt "mlflow<3" azureml-mlflow &&
-  python ml/train.py &&
-  python ml/evaluate.py &&
-  if python ml/promote.py --candidate ml/model; then
+  rc=0; python ml/promote.py --out-dir ml/model/candidate || rc=$?;
+  if [ "$rc" -eq 0 ]; then
     python ml/register_model.py --bundle ml/model --promote;
+  elif [ "$rc" -eq 1 ]; then
+    python ml/register_model.py --bundle ml/model/candidate;
   else
-    python ml/register_model.py --bundle ml/model;
+    exit "$rc";
   fi
 
 environment: azureml:AzureML-sklearn-1.5@latest

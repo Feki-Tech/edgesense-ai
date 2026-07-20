@@ -37,7 +37,7 @@ def main() -> int:
                     help="Path to ml/model/ (model.joblib + model.manifest.json)")
     ap.add_argument("--model-name", default=MODEL_NAME)
     ap.add_argument("--promote", action="store_true",
-                    help="Set the 'champion' alias to the newly registered version "
+                    help="Tag the newly registered version as champion "
                          "(run ml/promote.py first — this script does NOT gate).")
     args = ap.parse_args()
 
@@ -48,7 +48,7 @@ def main() -> int:
         return 1
     manifest = json.loads(manifest_path.read_text())
 
-    version_tag = manifest.get("version", "unknown")
+    version_tag = manifest.get("model_version", "unknown")
     metrics = manifest.get("metrics", {})
 
     mlflow.set_experiment("edgesense-training")
@@ -59,7 +59,7 @@ def main() -> int:
                 mlflow.log_metric(key, value)
         mlflow.log_params({
             "edgesense_version": version_tag,
-            "training_data_hash": manifest.get("training_data_hash", ""),
+            "training_data_hash": manifest.get("training_data", {}).get("sha256", ""),
         })
         # Log the whole bundle (joblib + manifest + model card) as artifacts.
         mlflow.log_artifacts(str(bundle), artifact_path="model")
