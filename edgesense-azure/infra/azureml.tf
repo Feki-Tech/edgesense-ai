@@ -55,9 +55,39 @@ resource "azurerm_machine_learning_workspace" "this" {
   }
 }
 
+# Continuous-training compute (Phase 4 retrain job targets this).
+# Serverless AML quota is 0 on trial/free subscriptions; a min_node_count = 0
+# cluster keeps the same zero-idle-cost property (deallocates when idle) while
+# drawing from the dedicated-cores quota, which trial subs do have.
+# Standard_D4as_v4 is a cheap AMD size in a family with available AML quota.
+resource "azurerm_machine_learning_compute_cluster" "cpu" {
+  count                         = var.enable_phase2_azureml ? 1 : 0
+  name                          = "edgesense-cpu"
+  location                      = azurerm_resource_group.this.location
+  vm_priority                   = "Dedicated"
+  vm_size                       = "Standard_D4as_v4"
+  machine_learning_workspace_id = azurerm_machine_learning_workspace.this[0].id
+  tags                          = var.tags
+
+  scale_settings {
+    min_node_count                       = 0 # scale to zero: no cost when idle
+    max_node_count                       = 1
+    scale_down_nodes_after_idle_duration = "PT120S" # deallocate 2 min after a job
+  }
+
+  identity {
+    type = "SystemAssigned"
+  }
+}
+
 output "aml_workspace_name" {
   description = "Azure ML workspace (also the MLflow tracking server). Null unless enable_phase2_azureml = true."
   value       = try(azurerm_machine_learning_workspace.this[0].name, null)
+}
+
+output "aml_compute_cluster" {
+  description = "Scale-to-zero AmlCompute cluster the retrain job targets. Null unless enable_phase2_azureml = true."
+  value       = try(azurerm_machine_learning_compute_cluster.cpu[0].name, null)
 }
 
 output "aml_mlflow_note" {
