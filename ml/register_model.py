@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -52,17 +53,20 @@ def main() -> int:
     version_tag = manifest.get("model_version", "unknown")
     metrics = manifest.get("metrics", {})
 
-    # Inside an Azure ML job there is already an active MLflow run (the job
-    # itself) whose ID is fixed by the environment — starting a fresh run there
-    # raises "active run ID does not match environment run ID". So reuse the
-    # ambient run when present, and only start our own when run standalone
-    # (e.g. the Phase-2 manual `python ml/register_model.py`).
+    # Inside an Azure ML job MLflow is bound to the job's own run via the
+    # MLFLOW_RUN_ID env var; starting a fresh run there raises "active run ID
+    # does not match environment run ID". So attach to that run (and leave it
+    # for AML to finish — nullcontext, no end_run). Only when run standalone
+    # (the Phase-2 manual `python ml/register_model.py`) do we own a new run.
+    env_run_id = os.environ.get("MLFLOW_RUN_ID")
     active = mlflow.active_run()
-    if active is None:
+    if active is not None:
+        run_ctx = contextlib.nullcontext(active)
+    elif env_run_id:
+        run_ctx = contextlib.nullcontext(mlflow.start_run(run_id=env_run_id))
+    else:
         mlflow.set_experiment("edgesense-training")
         run_ctx = mlflow.start_run(run_name=f"register-{version_tag}")
-    else:
-        run_ctx = contextlib.nullcontext(active)
 
     with run_ctx as run:
         # Log the manifest's metric snapshot so the registry entry is self-describing.
