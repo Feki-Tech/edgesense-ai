@@ -77,7 +77,9 @@ services:
     restart: unless-stopped
 
   simulator:
-    build: ./simulator
+    build:
+      context: .
+      dockerfile: simulator/Dockerfile
     container_name: edgesense-simulator
     # scale the virtual fleet: EDGESENSE_MACHINES=10 docker compose up -d simulator
     command: ["--broker", "mosquitto", "--port", "1883", "--machines", "${EDGESENSE_MACHINES:-3}"]
@@ -86,7 +88,9 @@ services:
     restart: unless-stopped
 
   dashboard:
-    build: ./dashboard
+    build:
+      context: .
+      dockerfile: dashboard/Dockerfile
     container_name: edgesense-dashboard
     ports:
       - "8501:8501"
@@ -101,7 +105,9 @@ services:
     restart: unless-stopped
 
   mcp-server:
-    build: ./mcp_server
+    build:
+      context: .
+      dockerfile: mcp_server/Dockerfile
     container_name: edgesense-mcp
     ports:
       - "8900:8900"

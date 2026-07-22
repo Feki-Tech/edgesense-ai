@@ -1,9 +1,15 @@
 # Build from repo root: docker build -f inference/Dockerfile .
 FROM python:3.12-slim
-WORKDIR /app
 
-COPY inference/requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# uv: fast, reproducible installs straight from the committed lock.
+COPY --from=ghcr.io/astral-sh/uv:0.11.30 /uv /uvx /bin/
+WORKDIR /app
+ENV UV_COMPILE_BYTECODE=1
+
+# Install only the inference service's dependency slice, pinned from uv.lock.
+COPY pyproject.toml uv.lock ./
+RUN uv export --frozen --no-emit-project --no-hashes --no-dev --extra inference -o /tmp/req.txt \
+ && uv pip install --system --no-cache -r /tmp/req.txt
 
 COPY ml/ ml/
 COPY inference/ inference/

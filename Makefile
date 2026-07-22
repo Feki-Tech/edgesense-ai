@@ -1,5 +1,6 @@
-VENV := .venv
-PY := $(VENV)/bin/python
+# uv manages the project virtualenv (.venv) from pyproject.toml + uv.lock.
+# `uv run` auto-syncs before running, so every target below stays reproducible.
+PY := uv run python
 MACHINES ?= 10
 
 .PHONY: setup deps broker broker-down train export-onnx inference agent simulate dashboard mcp smoke test snap stack stack-down stack-logs stack-coap stack-secure stack-secure-down check-acl demo demo-offline demo-offline-coap eval benchmark fleet promote promote-torch
@@ -40,8 +41,8 @@ eval:            ## offline model evaluation -> docs/EVALUATION.md
 promote:         ## champion/challenger gate: train, evaluate both, promote or refuse
 	$(PY) ml/promote.py
 
-promote-torch:   ## same gate with a PyTorch-trained challenger (needs requirements-torch.txt)
-	$(PY) ml/promote.py --backend torch
+promote-torch:   ## same gate with a PyTorch-trained challenger (pulls the torch extra)
+	uv run --extra torch python ml/promote.py --backend torch
 
 benchmark:       ## public-dataset benchmark (downloads AI4I 2020 once) -> docs/BENCHMARK.md
 	$(PY) ml/benchmark_public.py --out docs/BENCHMARK.md
@@ -49,10 +50,8 @@ benchmark:       ## public-dataset benchmark (downloads AI4I 2020 once) -> docs/
 fleet:           ## scale the simulated fleet, e.g. make fleet MACHINES=25
 	EDGESENSE_MACHINES=$(MACHINES) docker compose up -d simulator
 
-setup:
-	python3 -m venv $(VENV)
-	$(PY) -m pip install --upgrade pip
-	$(PY) -m pip install -r requirements-dev.txt
+setup:           ## create the uv-managed .venv (all service extras + dev tools; torch is on-demand via `make promote-torch`)
+	uv sync --extra inference --extra dashboard --extra simulator --extra mcp-server --extra scripts
 	if command -v go >/dev/null 2>&1; then \
 		cd edge-agent && go mod tidy; \
 		cd ../coap-receiver && go mod tidy; \
@@ -82,7 +81,7 @@ simulate:
 	$(PY) simulator/simulate.py --machines 3
 
 dashboard:
-	$(VENV)/bin/streamlit run dashboard/app.py
+	uv run streamlit run dashboard/app.py
 
 mcp:             ## MCP server on stdio (for local MCP clients)
 	$(PY) mcp_server/server.py

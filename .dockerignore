@@ -1,5 +1,6 @@
 .git
 .venv
+.uvvenv
 .run
 .idea
 .vscode
@@ -14,3 +15,5 @@ parts
 stage
 prime
 tests
+edgesense-azure
+docs

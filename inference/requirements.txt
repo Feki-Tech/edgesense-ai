@@ -1,6 +1,0 @@
-numpy
-scikit-learn
-joblib
-fastapi
-uvicorn
-prometheus_client

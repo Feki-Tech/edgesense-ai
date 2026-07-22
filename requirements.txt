@@ -1,3 +1,9 @@
+# Source of truth for dependencies is pyproject.toml + uv.lock. This loose,
+# unpinned list exists ONLY for the Azure ML retrain job (edgesense-azure/ml/
+# retrain_job.yml), which runs inside AML's curated environment — strict pins
+# would collide with that image's pre-installed packages. Local dev, CI and the
+# Docker images install from the lock via uv instead. Keep this in sync with
+# pyproject's [project.dependencies] by hand.
 numpy
 pandas
 scikit-learn
