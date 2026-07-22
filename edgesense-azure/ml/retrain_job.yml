@@ -30,6 +30,8 @@ command: >-
 
 environment: azureml:AzureML-sklearn-1.5@latest
 
+# Standard_D4s_v3 (DSv3 family): fits the default 4-core quota on trial/free
+# subscriptions. Standard_E4s_v3 needs ESv3 quota, which is 0 by default.
 resources:
-  instance_type: Standard_E4s_v3
+  instance_type: Standard_D4s_v3
   instance_count: 1
