@@ -1,3 +1,6 @@
+# Loose deps for the Azure ML retrain job's curated environment only — see the
+# note in requirements.txt. Source of truth for dev tooling is the `dev`
+# dependency-group in pyproject.toml (installed elsewhere via `uv sync`).
 -r requirements.txt
 pytest
 httpx

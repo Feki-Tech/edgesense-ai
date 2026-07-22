@@ -13,14 +13,14 @@ ACR_NAME="${1:?Usage: build-and-push.sh <acr-name> [tag] [repo-root]}"
 TAG="${2:-latest}"
 REPO_ROOT="${3:-.}"
 
-# image -> "dockerfile:context" (paths relative to REPO_ROOT). Inference
-# builds from the repo root because it bakes ml/ at build time; the other
-# services expect their own directory as context (mirrors docker-compose).
+# image -> "dockerfile:context" (paths relative to REPO_ROOT). The Python
+# services build from the repo root so they can install their slice from the
+# shared pyproject.toml + uv.lock; the Go agent keeps its own directory.
 declare -A SERVICES=(
   ["edgesense-inference"]="inference/Dockerfile:."
   ["edgesense-agent"]="edge-agent/Dockerfile:edge-agent"
-  ["edgesense-simulator"]="simulator/Dockerfile:simulator"
-  ["edgesense-dashboard"]="dashboard/Dockerfile:dashboard"
+  ["edgesense-simulator"]="simulator/Dockerfile:."
+  ["edgesense-dashboard"]="dashboard/Dockerfile:."
 )
 
 for image in "${!SERVICES[@]}"; do

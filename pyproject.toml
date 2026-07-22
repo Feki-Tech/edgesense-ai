@@ -1,0 +1,68 @@
+[project]
+name = "edgesense-ai"
+version = "0.1.0"
+description = "Edge anomaly detection for industrial machines: MQTT sensor stream, on-device scoring, and an Azure MLOps loop."
+readme = "README.md"
+requires-python = ">=3.10"
+# Base = the shared ML core imported across services and the training/scoring
+# code (ml/). Per-service runtime deps live in optional-dependencies so each
+# container image installs only its slice from the lock (see the Dockerfiles).
+dependencies = [
+    "numpy",
+    "scikit-learn",
+    "joblib",
+]
+
+[project.optional-dependencies]
+# One extra per container service — mirrors the minimal deps each image needs.
+inference = [
+    "fastapi",
+    "uvicorn[standard]",
+    "prometheus-client",
+]
+dashboard = [
+    "streamlit",
+    "streamlit-autorefresh",
+    "plotly",
+    "pandas",
+    "paho-mqtt>=2.0",
+]
+simulator = [
+    "paho-mqtt>=2.0",
+]
+# MCP server (mcp_server/) — a local compose service, not part of the Azure
+# deployment, but built the same lock-driven way for consistency.
+mcp-server = [
+    "mcp>=1.8",
+    "paho-mqtt>=2.0",
+    "requests",
+]
+# Local demo/utility scripts (scripts/), not shipped in any image.
+scripts = [
+    "requests",
+    "mcp>=1.8",
+]
+# Optional PyTorch training backend: `ml/train.py --backend torch`.
+# CPU wheels are small; CUDA builds: https://pytorch.org/get-started/locally/
+torch = [
+    "torch",
+]
+
+[dependency-groups]
+# Dev / CI / continuous-training tooling: tests plus the ONNX toolchain the
+# promotion gate (ml/promote.py) uses for its parity check.
+# onnxruntime's newest wheels differ by Python: the Azure ML curated env runs
+# 3.10 (wheels cap at 1.23.2), while local/CI run 3.11+ and get newer builds.
+# Both load the IR-10 model export (ml/export_onnx.py pins the IR version).
+dev = [
+    "pytest",
+    "httpx",
+    "onnx",
+    "onnxruntime<=1.23.2; python_full_version < '3.11'",
+    "onnxruntime; python_full_version >= '3.11'",
+]
+
+[tool.uv]
+# This is an application, not a distributable package: sync installs the
+# dependencies but never tries to build/install the project itself.
+package = false

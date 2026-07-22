@@ -195,13 +195,14 @@ an internal network with two brokers: `mosquitto` (local sensor bus) and
 
 Prerequisites:
 
-- Python 3.12+
+- [uv](https://docs.astral.sh/uv/) (manages the Python venv from `pyproject.toml` + `uv.lock`)
+- Python 3.10+ (uv will fetch a suitable interpreter if needed)
 - Docker (for the brokers / full stack)
 - Go 1.22+ — only for running the agent locally (`make agent`, `make test`); `make setup` skips the Go deps with a warning if Go is missing
 - `mosquitto-clients` (optional, for manual fault injection)
 
 ```bash
-make setup        # venv + python deps (incl. dev) + go deps
+make setup        # uv sync (venv + all service extras + dev tools) + go deps
 make broker       # start mosquitto (docker)
 make train        # train + validate the anomaly model
 
@@ -229,9 +230,9 @@ backends emit the exact same bundle format — raw numpy weights, so inference
 needs neither torch nor a fitted sklearn estimator:
 
 ```bash
-make train                                      # sklearn MLPRegressor (default; CI + Docker)
-.venv/bin/python ml/train.py --backend torch    # PyTorch (pip install -r requirements-torch.txt; CUDA if available)
-.venv/bin/python ml/train.py --model iforest    # legacy IsolationForest baseline, for comparison
+make train                                 # sklearn MLPRegressor (default; CI + Docker)
+uv run --extra torch python ml/train.py --backend torch   # PyTorch (pulls the torch extra; CUDA if available)
+uv run python ml/train.py --model iforest  # legacy IsolationForest baseline, for comparison
 ```
 
 Scoring stays hybrid (`ml/scoring.py`): a reading is anomalous if the

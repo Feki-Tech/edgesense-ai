@@ -76,6 +76,10 @@ def build_onnx(bundle: dict):
         inits,
     )
     model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 18)])
+    # Pin the IR version for portability: newer onnx defaults (IR 13) can't be
+    # loaded by older onnxruntime builds (e.g. 1.23.x, max IR 11). IR 10 is
+    # accepted by onnxruntime >= 1.16 and is ample for these opset-18 ops.
+    model.ir_version = 10
     onnx.checker.check_model(model)
     return model
 
