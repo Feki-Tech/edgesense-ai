@@ -3,7 +3,8 @@
 # register in MLflow. Submitted on demand by the retrain workflow (or manually:
 #   az ml job create -f retrain_job.yml -w edgesense-mlw -g edgesense-rg )
 #
-# Uses serverless compute: you pay only for the minutes the job runs.
+# Runs on the scale-to-zero AmlCompute cluster (see `compute:` below): you pay
+# only for the minutes a node is up, and it deallocates when idle.
 $schema: https://azuremlschemas.azureedge.net/latest/commandJob.schema.json
 display_name: edgesense-drift-retrain
 experiment_name: edgesense-continuous-training
@@ -17,8 +18,14 @@ code: ../..   # repo root (this file lives at edgesense-azure/ml/ inside the rep
 # promote.py trains the challenger, replays the offline evaluation harness on
 # challenger + current champion, and exits 0 (promoted -> ml/model is the new
 # champion), 1 (refused -> candidate parked in --out-dir), or 2 (error).
+#
+# onnx/onnxruntime are pinned: the AzureML-sklearn-1.5 image ships onnxruntime
+# 1.23.2 (max ONNX IR 11), which "already satisfies" the unpinned requirement
+# and is never upgraded — but onnx 1.22 emits IR 13, so the gate's ONNX parity
+# check fails. onnxruntime 1.27 supports IR 13 (verified locally).
 command: >-
-  pip install -r requirements-dev.txt "mlflow<3" azureml-mlflow &&
+  pip install -r requirements-dev.txt "mlflow<3" azureml-mlflow
+  "onnx==1.22.0" "onnxruntime==1.27.0" &&
   rc=0; python ml/promote.py --out-dir ml/model/candidate || rc=$?;
   if [ "$rc" -eq 0 ]; then
     python ml/register_model.py --bundle ml/model --promote;
