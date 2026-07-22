@@ -54,7 +54,7 @@ resource "azurerm_dashboard_grafana" "this" {
   name                  = "${local.name}-grafana"
   resource_group_name   = azurerm_resource_group.this.name
   location              = azurerm_resource_group.this.location
-  grafana_major_version = 11
+  grafana_major_version = 12
   sku                   = "Standard"
   tags                  = var.tags
 

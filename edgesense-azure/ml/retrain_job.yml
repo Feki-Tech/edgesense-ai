@@ -18,7 +18,7 @@ code: ../..   # repo root (this file lives at edgesense-azure/ml/ inside the rep
 # challenger + current champion, and exits 0 (promoted -> ml/model is the new
 # champion), 1 (refused -> candidate parked in --out-dir), or 2 (error).
 command: >-
-  pip install -r requirements.txt "mlflow<3" azureml-mlflow &&
+  pip install -r requirements-dev.txt "mlflow<3" azureml-mlflow &&
   rc=0; python ml/promote.py --out-dir ml/model/candidate || rc=$?;
   if [ "$rc" -eq 0 ]; then
     python ml/register_model.py --bundle ml/model --promote;

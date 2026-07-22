@@ -115,6 +115,10 @@ resource "azurerm_container_app" "broker" {
   revision_mode                = "Single"
   tags                         = var.tags
 
+  # Phase 3: the KV secret reference only resolves once the managed identity
+  # has read access — make that ordering explicit (no-op when phase 3 is off).
+  depends_on = [azurerm_key_vault_access_policy.apps]
+
   identity {
     type         = "UserAssigned"
     identity_ids = [azurerm_user_assigned_identity.apps.id]
@@ -226,6 +230,10 @@ resource "azurerm_container_app" "agent" {
   container_app_environment_id = azurerm_container_app_environment.this.id
   revision_mode                = "Single"
   tags                         = var.tags
+
+  # Phase 3: KV secret reference resolves only after the managed identity has
+  # read access — make that ordering explicit (no-op when phase 3 is off).
+  depends_on = [azurerm_key_vault_access_policy.apps]
 
   identity {
     type         = "UserAssigned"
