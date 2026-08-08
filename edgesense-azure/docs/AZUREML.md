@@ -51,15 +51,21 @@ az ml online-endpoint delete -n edgesense-anomaly-ep -w edgesense-mlw -g edgesen
 ## How this integrates with the existing MLOps loop
 
 - `promote.py` stays the **quality gate**; MLflow becomes the **system of
-  record**. Gate passes → `--promote` flips the `champion` alias. Gate not
-  yet run → version lands as `challenger`.
+  record**. Gate passes → `--promote` tags the version `role=champion` and
+  moves the model-level `champion_version` pointer. Gate not yet run → version
+  lands as `challenger`. (Azure ML's MLflow registry does not implement the
+  alias API — `@champion` 404s — so the pointer lives in tags; readers resolve
+  it the same way, see `inference/registry.py`.)
 - Every registered version carries the EdgeSense manifest version
   (`{YYYYMMDD.HHMMSS}+{git7}`) and the manifest's metric snapshot, so the
   registry UI answers "what's deployed and how good is it" at a glance.
-- The Container Apps inference sidecar can later pull `@champion` from the
-  registry at startup instead of baking the model at build time — that's the
-  natural Phase 2.5 refactor, and it makes `POST /reload` a true
-  registry-driven rollout.
+- **Phase 2.5 (shipped):** the inference sidecar can now pull the champion
+  from the registry instead of baking the model at build time — set
+  `EDGESENSE_MODEL_SOURCE=registry` (plus `MLFLOW_TRACKING_URI`) and it loads
+  the champion at startup; `POST /reload?source=registry` pulls a newly
+  promoted one without a redeploy. Falls back to the baked-in bundle when the
+  registry is unreachable, so an edge node still boots offline. Install the
+  extra: `uv sync --extra inference --extra registry`.
 
 ## Caveats
 

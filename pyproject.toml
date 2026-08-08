@@ -20,6 +20,14 @@ inference = [
     "uvicorn[standard]",
     "prometheus-client",
 ]
+# Serve the champion straight from the Azure ML / MLflow registry
+# (EDGESENSE_MODEL_SOURCE=registry). Optional: the file-backed default needs
+# none of this, so edge images stay small.
+registry = [
+    "mlflow<3",
+    "azureml-mlflow",
+    "azure-identity",
+]
 dashboard = [
     "streamlit",
     "streamlit-autorefresh",

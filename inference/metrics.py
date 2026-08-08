@@ -57,6 +57,11 @@ RELOADS = Counter(
     "Hot-reload attempts, by result",
     ["result"], registry=REGISTRY)
 
+REGISTRY_PULLS = Counter(
+    "edgesense_model_registry_pulls_total",
+    "Champion fetches from the MLflow model registry, by result",
+    ["result"], registry=REGISTRY)
+
 SHADOW_SCORED = Counter(
     "edgesense_model_shadow_scored_total",
     "Readings also scored by the shadow (challenger) model",

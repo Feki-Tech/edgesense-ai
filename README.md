@@ -538,7 +538,8 @@ Notes:
 - [x] MLOps phase 1: model manifest & versioning, serving-side drift metrics, hot reload, champion/challenger promotion gate ([`docs/MLOPS.md`](docs/MLOPS.md))
 - [ ] Alerting: Grafana alert rules on buffer depth / uplink downtime (drift alert shipped with MLOps phase 1)
 - [ ] Inference service as a second snap; model updates as snap refreshes
-- [ ] MLOps phase 2: OTA model delivery with signature verification, shadow scoring, feedback/labeling loop, per-machine thresholds, model registry (outlook in [`docs/MLOPS.md`](docs/MLOPS.md))
+- [x] MLOps phase 2.5: serve the registered champion from the Azure ML/MLflow registry instead of baking it at build time ([`docs/MLOPS.md`](docs/MLOPS.md) §2.6)
+- [ ] MLOps phase 2 (remaining): OTA model delivery with signature verification, feedback/labeling loop, per-machine thresholds, per-tenant registry (outlook in [`docs/MLOPS.md`](docs/MLOPS.md))
 
 ## Platform vision
 
