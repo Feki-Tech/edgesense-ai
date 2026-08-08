@@ -7,8 +7,13 @@ WORKDIR /app
 ENV UV_COMPILE_BYTECODE=1
 
 # Install only the inference service's dependency slice, pinned from uv.lock.
+# To serve the champion from the MLflow registry (EDGESENSE_MODEL_SOURCE=registry)
+# the image also needs the registry extra — it is opt-in so the default edge
+# image stays small:
+#   docker build --build-arg EDGESENSE_EXTRAS="--extra inference --extra registry" ...
+ARG EDGESENSE_EXTRAS="--extra inference"
 COPY pyproject.toml uv.lock ./
-RUN uv export --frozen --no-emit-project --no-hashes --no-dev --extra inference -o /tmp/req.txt \
+RUN uv export --frozen --no-emit-project --no-hashes --no-dev $EDGESENSE_EXTRAS -o /tmp/req.txt \
  && uv pip install --system --no-cache -r /tmp/req.txt
 
 COPY ml/ ml/

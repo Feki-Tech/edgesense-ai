@@ -186,6 +186,37 @@ the report (`edgesense_model_shadow_scored_total`,
 `…_shadow_disagreements_total{kind}`, `…_shadow_score_diff`,
 `…_shadow_errors_total`, `…_shadow_info`) for dashboards and alerting.
 
+### 2.6 Registry-driven serving — the champion reaches production
+
+§2.4 decides *which* model should serve and `ml/register_model.py` records
+that decision in the Azure ML / MLflow registry. Registry-driven serving is
+the half that makes the decision take effect: with
+`EDGESENSE_MODEL_SOURCE=registry` (plus `MLFLOW_TRACKING_URI`) the sidecar
+loads the **registered champion** at startup instead of the bundle baked into
+the image, and pulls a newly promoted one on demand:
+
+```bash
+curl -X POST 'localhost:8800/reload?source=registry'
+# → {"status":"reloaded","old_version":"20260727.063322+6e5385e",
+#    "new_version":"20260803.062557+6e5385e","source":"registry",
+#    "registry_version":"4"}
+curl localhost:8800/healthz   # model_source + registry_version
+```
+
+Champion resolution mirrors registration: Azure ML's MLflow registry does not
+implement the alias API (`@champion` 404s), so the pointer lives in the
+model-level `champion_version` tag, with a fallback scan for the newest
+version tagged `role=champion` (`inference/registry.py`).
+
+Guarantees: the download is validated by the **same** validate-before-swap
+path as a file reload (shape/threshold/activation checks plus a smoke score),
+so a corrupt or incompatible artifact is refused with the old champion still
+serving; if the registry is unreachable **at startup** the baked-in bundle
+serves instead, because an edge node must boot offline; and `mlflow` is an
+optional extra (`uv sync --extra inference --extra registry`) so the default
+file-backed image stays small. Pulls are counted in
+`edgesense_model_registry_pulls_total{result}`.
+
 ## 3. Phase 2+ outlook
 
 - **OTA model delivery to the edge** — ship promoted bundles to devices as
@@ -202,9 +233,10 @@ the report (`edgesense_model_shadow_scored_total`,
 - **Per-machine thresholds** — calibrate the alarm threshold (and possibly
   the scaler) per machine once real fleets show per-asset baselines; the
   bundle format already carries both.
-- **Model registry** — a registry service (PLATFORM.md §5) holding
-  manifests, artifacts and promotion history per org/site, replacing
-  bake-at-build with pull-by-version.
+- **Model registry** — pull-by-version now works against Azure ML (§2.6);
+  what remains is a *platform* registry (PLATFORM.md §5) holding manifests,
+  artifacts and promotion history **per org/site**, so each tenant rolls out
+  its own champion.
 - **Continuous training** — scheduled retrain + gate runs once field data
   exists, with the poisoning mitigations of SECURITY.md §2.4 (authenticated
   sensor path, provenance, canary eval) as prerequisites.

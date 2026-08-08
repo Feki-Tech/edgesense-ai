@@ -15,9 +15,18 @@ MLOps phase 1 additions (the /score contract is unchanged):
 - GET  /healthz  also reports model_version + created_at from the manifest
 - GET  /metrics  Prometheus metrics: scored counter, score histogram, and
                  per-feature drift gauges (z-shift + PSI vs training stats)
-- POST /reload   atomically re-loads the bundle from disk (also on SIGHUP
-                 where the platform has it); the old model keeps serving if
-                 the new file is missing or invalid
+- POST /reload   atomically re-loads the bundle (also on SIGHUP where the
+                 platform has it); the old model keeps serving if the new
+                 bundle is missing or invalid
+
+Registry-driven serving (phase 2.5 — the champion reaches production):
+
+- EDGESENSE_MODEL_SOURCE=registry loads the champion tagged in the Azure ML /
+  MLflow registry instead of the bundle baked into the image, so promoting a
+  model rolls it out here. If the registry is unreachable at startup the
+  baked-in bundle still serves (an edge node must boot offline).
+- POST /reload?source=registry pulls a freshly promoted champion on demand,
+  through the same validate-before-swap path as a file reload.
 
 Shadow scoring (§2.5 of docs/MLOPS.md — online champion/challenger evidence):
 
@@ -57,13 +66,21 @@ SHADOW_PATH = Path(os.environ.get(
 ))
 DRIFT_WINDOW = int(os.environ.get("EDGESENSE_DRIFT_WINDOW", DEFAULT_WINDOW))
 
+# "file" (default) keeps the baked-in bundle authoritative; "registry" follows
+# the champion tagged in the MLflow registry, so a promotion rolls out here.
+MODEL_SOURCE = os.environ.get("EDGESENSE_MODEL_SOURCE", "file").strip().lower()
+MODEL_NAME = os.environ.get("EDGESENSE_MODEL_NAME", "edgesense-anomaly")
+
 
 class _ModelState:
     """Immutable snapshot of a loaded bundle; swapped atomically on reload."""
 
-    def __init__(self, bundle: dict, path: Path) -> None:
+    def __init__(self, bundle: dict, path: Path, *, source: str = "file",
+                 registry_version: str | None = None) -> None:
         self.bundle = bundle
         self.path = path
+        self.source = source
+        self.registry_version = registry_version
         self.features: list[str] = list(bundle["features"])
         manifest = bundle.get("manifest") or {}
         self.model_version: str = manifest.get("model_version", "unknown")
@@ -122,10 +139,50 @@ def _load_state(path: Path) -> _ModelState:
     return _ModelState(_validate_bundle(joblib.load(path)), path)
 
 
+def _load_registry_state() -> _ModelState:
+    """Fetch the registry champion and validate it with the serving arithmetic.
+
+    Raises whatever the registry layer raises (RegistryError) or ValueError
+    from validation — callers decide whether that is fatal.
+    """
+    from inference.registry import fetch_champion
+
+    ref = fetch_champion(MODEL_NAME)
+    return _ModelState(_validate_bundle(joblib.load(ref.path)), ref.path,
+                       source="registry", registry_version=ref.registry_version)
+
+
+def _load_source_state(source: str) -> _ModelState:
+    """Load a state from the named source ("file" or "registry")."""
+    if source == "registry":
+        return _load_registry_state()
+    return _load_state(MODEL_PATH)
+
+
+def _initial_state() -> _ModelState:
+    """State to boot with.
+
+    With the registry source configured we still fall back to the baked-in
+    bundle when the registry is unreachable: an edge node that boots offline
+    must keep scoring with the model it shipped with rather than fail to start.
+    """
+    if MODEL_SOURCE != "registry":
+        return _load_state(MODEL_PATH)
+    try:
+        state = _load_registry_state()
+    except Exception as exc:
+        metrics.REGISTRY_PULLS.labels(result="failed").inc()
+        print(f"registry champion unavailable ({exc}); falling back to {MODEL_PATH}",
+              file=sys.stderr)
+        return _load_state(MODEL_PATH)
+    metrics.REGISTRY_PULLS.labels(result="ok").inc()
+    return state
+
+
 app = FastAPI(title="EdgeSense Inference")
 app.mount("/metrics", metrics.metrics_app())
 
-_state = _load_state(MODEL_PATH)
+_state = _initial_state()
 _state_lock = threading.Lock()  # serializes reloads and shadow swaps, not scoring
 _drift = DriftTracker(_state.features, *_state.drift_stats(), window=DRIFT_WINDOW)
 _shadow: "tuple[_ModelState, ShadowTracker] | None" = None  # swapped as one reference
@@ -164,7 +221,8 @@ def healthz() -> dict:
     state = _state
     return {"status": "ok", "model": str(state.path), "features": state.features,
             "model_kind": state.bundle.get("kind", "iforest"),
-            "model_version": state.model_version, "created_at": state.created_at}
+            "model_version": state.model_version, "created_at": state.created_at,
+            "model_source": state.source, "registry_version": state.registry_version}
 
 
 @app.post("/score")
@@ -204,26 +262,41 @@ def score(reading: Reading) -> dict:
 
 
 @app.post("/reload")
-def reload_model() -> dict:
-    """Re-load the bundle from disk and swap it in atomically.
+def reload_model(source: str | None = None) -> dict:
+    """Re-load the model and swap it in atomically.
+
+    Loads from the configured source (``EDGESENSE_MODEL_SOURCE``, "file" by
+    default); ``?source=file|registry`` overrides it for a single call, which
+    is how ops pulls a freshly promoted champion on a file-configured node.
 
     Returns the old and new model versions; on any load/validation error the
     current model keeps serving and the request fails with 400.
     """
+    requested = (source or MODEL_SOURCE).strip().lower()
+    if requested not in ("file", "registry"):
+        raise HTTPException(status_code=400,
+                            detail=f"unknown source {requested!r}, expected file|registry")
+
     with _state_lock:
         old = _state
         try:
-            new_state = _load_state(MODEL_PATH)
+            new_state = _load_source_state(requested)
         except Exception as exc:
             metrics.RELOADS.labels(result="rejected").inc()
+            if requested == "registry":
+                metrics.REGISTRY_PULLS.labels(result="failed").inc()
             raise HTTPException(
                 status_code=400,
                 detail=f"reload rejected, keeping {old.model_version}: {exc}",
             ) from exc
         _swap_state(new_state)
     metrics.RELOADS.labels(result="ok").inc()
+    if requested == "registry":
+        metrics.REGISTRY_PULLS.labels(result="ok").inc()
     return {"status": "reloaded", "old_version": old.model_version,
-            "new_version": new_state.model_version, "model": str(new_state.path)}
+            "new_version": new_state.model_version, "model": str(new_state.path),
+            "source": new_state.source,
+            "registry_version": new_state.registry_version}
 
 
 @app.post("/shadow/load")
