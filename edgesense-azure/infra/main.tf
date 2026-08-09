@@ -378,3 +378,60 @@ resource "azurerm_container_app" "dashboard" {
     }
   }
 }
+
+########################################################################
+# 6. Prometheus (Phase 4 prerequisite, ships with Phase 3's Grafana).
+#
+#    Without this there is no data source holding the sidecar's drift
+#    gauges, so the PSI alert that is supposed to trigger retraining has
+#    nothing to evaluate — which is why repository_dispatch had never
+#    fired. Grafana reads Azure Monitor for logs, but the sidecar exposes
+#    edgesense_model_drift_psi in Prometheus format on its own /metrics;
+#    only a scraper turns that into something alertable.
+#
+#    Config is written at startup rather than baked into an image, the
+#    same trick the broker uses. TSDB is ephemeral: a restart loses
+#    history, which is fine for the 10-minute alert window but means this
+#    is demo-grade, not a retention story.
+########################################################################
+resource "azurerm_container_app" "prometheus" {
+  count = var.enable_phase3 ? 1 : 0
+
+  name                         = "${local.name}-prometheus"
+  resource_group_name          = azurerm_resource_group.this.name
+  container_app_environment_id = azurerm_container_app_environment.this.id
+  revision_mode                = "Single"
+  tags                         = var.tags
+
+  # Internal only — Grafana reaches it inside the environment. Nothing about
+  # the metrics endpoint is authenticated, so it must not be public.
+  ingress {
+    external_enabled = false
+    target_port      = 9090
+    transport        = "http"
+    traffic_weight {
+      latest_revision = true
+      percentage      = 100
+    }
+  }
+
+  template {
+    min_replicas = 1 # a scraper that scales to zero collects nothing
+    max_replicas = 1
+
+    container {
+      name   = "prometheus"
+      image  = "docker.io/prom/prometheus:v3.1.0"
+      cpu    = 0.25
+      memory = "0.5Gi"
+
+      # Internal ingress terminates TLS on 443 at the app FQDN, so the scrape
+      # target is the bare host over https (same addressing the agent uses to
+      # reach /score). Written to /tmp because the image runs as nobody.
+      command = ["/bin/sh", "-c"]
+      args = [
+        "printf 'global:\\n  scrape_interval: 30s\\nscrape_configs:\\n  - job_name: edgesense-inference\\n    scheme: https\\n    metrics_path: /metrics\\n    static_configs:\\n      - targets: [\"%s\"]\\n' '${azurerm_container_app.inference.ingress[0].fqdn}' > /tmp/prometheus.yml && exec /bin/prometheus --config.file=/tmp/prometheus.yml --storage.tsdb.path=/prometheus --storage.tsdb.retention.time=6h"
+      ]
+    }
+  }
+}

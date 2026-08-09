@@ -60,22 +60,45 @@ inference sidecar (PSI metric) ──► Grafana alert: PSI > 0.2 for 10 min
 No Functions, no Logic Apps, no standing compute — the trigger path is
 Grafana → GitHub API → serverless AML job. Idle cost: zero.
 
+### Status — the trigger path is not live yet
+
+As deployed today the loop runs **only** on its weekly cron and manual
+dispatch: across every `retrain-on-drift.yml` run so far the trigger event has
+been `schedule` or `workflow_dispatch`, never `repository_dispatch`. The
+drift-alert path has never fired.
+
+The reason is structural, not a misconfiguration. The PSI gauge
+(`edgesense_model_drift_psi`) lives on the inference sidecar's `/metrics` in
+Prometheus format, and the Azure stack had no scraper — Grafana's Azure Monitor
+data source sees Container Apps *logs*, not that gauge. With nothing holding
+the metric, the alert rule has nothing to evaluate.
+
+`infra/main.tf` now provisions a **Prometheus container app** (gated on
+`enable_phase3`) that scrapes the sidecar, which is the missing prerequisite.
+The steps below are what remains to close the loop.
+
 ### Setup
 
-1. Apply Phase 3 (`terraform apply`), open Grafana, create an **alert rule**
-   on your PSI metric (>0.2 for 10m) — same rule as
+1. Apply Phase 3 (`terraform apply`) — this now also creates the Prometheus
+   app. Take `terraform output prometheus_datasource_url` and add it in Grafana
+   as a **Prometheus data source with UID `edgesense-prom`** (that exact UID is
+   what the alert rule references).
+2. Create the **alert rule** on the PSI metric (>0.2 for 10m) — same rule as
    `deploy/grafana/provisioning/alerting/edgesense-drift.yml` in the repo.
-2. Create a **contact point** of type Webhook:
+3. Create a **contact point** of type Webhook:
    - URL: `https://api.github.com/repos/Feki-Tech/edgesense-ai/dispatches`
    - Method: POST, body: `{"event_type": "drift-alert"}`
    - Header `Authorization: Bearer <fine-grained PAT, contents: read+write>`
      (store the PAT in Key Vault; paste into Grafana once)
    - Header `Accept: application/vnd.github+json`
-3. Add repo variable `AML_WORKSPACE` (= `edgesense-mlw`) next to the existing
+4. Add repo variable `AML_WORKSPACE` (= `edgesense-mlw`) next to the existing
    Azure OIDC variables.
-4. Test end-to-end without waiting for real drift:
+5. Test end-to-end without waiting for real drift:
    `gh workflow run retrain-on-drift.yml` (manual trigger), or inject drift
    with the simulator's fault control topic and watch the whole loop fire.
+   The loop is only proven once a run shows trigger event
+   `repository_dispatch` — a green `schedule` run does not exercise the alert
+   path.
 
 ### Caveats
 
