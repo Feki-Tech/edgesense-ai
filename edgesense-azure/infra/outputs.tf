@@ -22,3 +22,8 @@ output "inference_internal_fqdn" {
   description = "Internal FQDN of the inference API (reachable inside the env)."
   value       = azurerm_container_app.inference.ingress[0].fqdn
 }
+
+output "prometheus_datasource_url" {
+  description = "Grafana data source URL for the drift metrics (phase 3/4). Add it as a Prometheus source with UID 'edgesense-prom' — the UID the provisioned drift alert references."
+  value       = try("https://${azurerm_container_app.prometheus[0].ingress[0].fqdn}", null)
+}
