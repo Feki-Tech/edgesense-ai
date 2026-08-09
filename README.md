@@ -172,6 +172,24 @@ labeled failure modes) and writes per-failure-mode recall and ROC-AUC to
 once into `ml/data/` (gitignored); the pipeline itself is covered by an
 offline test with synthetic data, so CI never touches the network.
 
+### 5. Real feature-contract benchmark — `make benchmark-rotating`
+
+AI4I is real data but exposes five unrelated tabular features, so it validates
+the *architecture* rather than the contract the sidecar serves. This one trains
+the same architecture on the [KAIST rotating-machine
+dataset](https://data.mendeley.com/datasets/ztmf3m7h5x) (CC BY 4.0) — the only
+openly licensed set carrying **vibration, temperature and motor current** on
+one machine at once — reduced from 25.6 kHz to the `{vibration, temperature,
+current}` reading contract at ~2 Hz, the same RMS-window reduction real
+hardware would do ([`docs/HARDWARE.md`](docs/HARDWARE.md) §4). Detection is
+reported per fault condition and severity, in
+[`docs/BENCHMARK-ROTATING.md`](docs/BENCHMARK-ROTATING.md).
+
+The dataset is 4.3 GB and is fetched manually, once — see
+[`docs/DATASETS.md`](docs/DATASETS.md). The loader and the reduction are
+covered by offline tests against synthetic `.mat`/`.tdms` fixtures, so CI stays
+network-free.
+
 ## Components
 
 | Path         | Role                                                              |

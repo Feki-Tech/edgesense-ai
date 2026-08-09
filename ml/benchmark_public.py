@@ -169,6 +169,11 @@ def main() -> int:
     ap.add_argument("--out", default=None, help="also write the report to this file")
     args = ap.parse_args()
 
+    # The report contains σ (the z-guard); a Windows console defaults to cp1252
+    # and print() would raise UnicodeEncodeError.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
     df = load_dataset(Path(args.data))
     results = run_benchmark(df, args.backend, seed=args.seed, epochs=args.epochs)
     md = to_markdown(results, {"seed": args.seed, "date": time.strftime("%Y-%m-%d")})
