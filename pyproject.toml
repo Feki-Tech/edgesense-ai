@@ -28,6 +28,14 @@ registry = [
     "azureml-mlflow",
     "azure-identity",
 ]
+# Offline benchmarks against public datasets (ml/benchmark_*.py). Not shipped
+# in any image and not needed by the core test suite — pandas for the AI4I
+# CSV, npTDMS/h5py for the KAIST rotating-machine .tdms/.mat files.
+benchmark = [
+    "pandas",
+    "nptdms",
+    "h5py",
+]
 dashboard = [
     "streamlit",
     "streamlit-autorefresh",

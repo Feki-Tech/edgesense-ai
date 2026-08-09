@@ -3,7 +3,7 @@
 PY := uv run python
 MACHINES ?= 10
 
-.PHONY: setup deps broker broker-down train export-onnx inference agent simulate dashboard mcp smoke test snap stack stack-down stack-logs stack-coap stack-secure stack-secure-down check-acl demo demo-offline demo-offline-coap eval benchmark fleet promote promote-torch
+.PHONY: setup deps broker broker-down train export-onnx inference agent simulate dashboard mcp smoke test snap stack stack-down stack-logs stack-coap stack-secure stack-secure-down check-acl demo demo-offline demo-offline-coap eval benchmark benchmark-rotating fleet promote promote-torch
 
 stack:
 	docker compose up -d --build
@@ -46,6 +46,9 @@ promote-torch:   ## same gate with a PyTorch-trained challenger (pulls the torch
 
 benchmark:       ## public-dataset benchmark (downloads AI4I 2020 once) -> docs/BENCHMARK.md
 	$(PY) ml/benchmark_public.py --out docs/BENCHMARK.md
+
+benchmark-rotating: ## real vibration/temperature/current benchmark -> docs/BENCHMARK-ROTATING.md (needs the 4.3 GB dataset, see docs/BENCHMARK.md)
+	$(PY) ml/benchmark_rotating.py --out docs/BENCHMARK-ROTATING.md
 
 fleet:           ## scale the simulated fleet, e.g. make fleet MACHINES=25
 	EDGESENSE_MACHINES=$(MACHINES) docker compose up -d simulator
