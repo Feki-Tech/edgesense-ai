@@ -435,10 +435,13 @@ resource "azurerm_container_app" "prometheus" {
   revision_mode                = "Single"
   tags                         = var.tags
 
-  # Internal only — Grafana reaches it inside the environment. Nothing about
-  # the metrics endpoint is authenticated, so it must not be public.
+  # External, behind basic auth. Managed Grafana lives outside the Container
+  # Apps environment (no VNet integration on this stack), so an internal-only
+  # ingress is unreachable from it — the data source has to come in over the
+  # public FQDN. Prometheus's own web.config basic auth (bcrypt hash below)
+  # is what keeps the endpoint from being public *and* unauthenticated.
   ingress {
-    external_enabled = false
+    external_enabled = true
     target_port      = 9090
     transport        = "http"
     traffic_weight {
@@ -457,12 +460,17 @@ resource "azurerm_container_app" "prometheus" {
       cpu    = 0.25
       memory = "0.5Gi"
 
-      # Internal ingress terminates TLS on 443 at the app FQDN, so the scrape
-      # target is the bare host over https (same addressing the agent uses to
-      # reach /score). Written to /tmp because the image runs as nobody.
+      # Ingress terminates TLS on 443 at the app FQDN, so the scrape target
+      # is the bare host over https (same addressing the agent uses to reach
+      # /score). Written to /tmp because the image runs as nobody. The web
+      # config adds basic auth for everything Prometheus serves; the bcrypt
+      # hash is precomputed and passed in as a variable because Terraform's
+      # bcrypt() re-salts every run, which would churn a new revision per
+      # apply. Own scrapes are unaffected — auth guards the HTTP listener,
+      # not outbound scraping.
       command = ["/bin/sh", "-c"]
       args = [
-        "printf 'global:\\n  scrape_interval: 30s\\nscrape_configs:\\n  - job_name: edgesense-inference\\n    scheme: https\\n    metrics_path: /metrics\\n    static_configs:\\n      - targets: [\"%s\"]\\n  - job_name: edgesense-agent\\n    scheme: https\\n    metrics_path: /metrics\\n    static_configs:\\n      - targets: [\"%s\"]\\n' '${azurerm_container_app.inference.ingress[0].fqdn}' '${azurerm_container_app.agent.name}.internal.${azurerm_container_app_environment.this.default_domain}' > /tmp/prometheus.yml && exec /bin/prometheus --config.file=/tmp/prometheus.yml --storage.tsdb.path=/prometheus --storage.tsdb.retention.time=6h"
+        "printf 'global:\\n  scrape_interval: 30s\\nscrape_configs:\\n  - job_name: edgesense-inference\\n    scheme: https\\n    metrics_path: /metrics\\n    static_configs:\\n      - targets: [\"%s\"]\\n  - job_name: edgesense-agent\\n    scheme: https\\n    metrics_path: /metrics\\n    static_configs:\\n      - targets: [\"%s\"]\\n' '${azurerm_container_app.inference.ingress[0].fqdn}' '${azurerm_container_app.agent.name}.internal.${azurerm_container_app_environment.this.default_domain}' > /tmp/prometheus.yml && printf 'basic_auth_users:\\n  %s: %s\\n' '${var.prometheus_auth_user}' '${var.prometheus_auth_bcrypt}' > /tmp/web.yml && exec /bin/prometheus --config.file=/tmp/prometheus.yml --web.config.file=/tmp/web.yml --storage.tsdb.path=/prometheus --storage.tsdb.retention.time=6h"
       ]
     }
   }
