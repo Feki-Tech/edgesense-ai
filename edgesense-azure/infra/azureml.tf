@@ -55,6 +55,23 @@ resource "azurerm_machine_learning_workspace" "this" {
   }
 }
 
+# Phase 2.5 — registry-driven serving: the container apps' identity reads the
+# champion out of the workspace registry (control plane) and downloads its
+# artifacts from the workspace storage (data plane). Read-only on both.
+resource "azurerm_role_assignment" "apps_ml_read" {
+  count                = var.enable_phase2_azureml ? 1 : 0
+  scope                = azurerm_machine_learning_workspace.this[0].id
+  role_definition_name = "AzureML Data Scientist"
+  principal_id         = azurerm_user_assigned_identity.apps.principal_id
+}
+
+resource "azurerm_role_assignment" "apps_ml_storage" {
+  count                = var.enable_phase2_azureml ? 1 : 0
+  scope                = azurerm_storage_account.ml[0].id
+  role_definition_name = "Storage Blob Data Reader"
+  principal_id         = azurerm_user_assigned_identity.apps.principal_id
+}
+
 # Continuous-training compute (Phase 4 retrain job targets this).
 # Serverless AML quota is 0 on trial/free subscriptions; a min_node_count = 0
 # cluster keeps the same zero-idle-cost property (deallocates when idle) while

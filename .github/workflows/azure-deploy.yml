@@ -51,7 +51,15 @@ jobs:
             "edgesense-dashboard:dashboard/Dockerfile:."; do
             IFS=: read -r image dockerfile context <<< "$svc"
             echo "Building $image:$IMAGE_TAG"
-            docker build -t "$acr_server/$image:$IMAGE_TAG" \
+            # Phase 2.5: the deployed inference image includes the registry
+            # extra (mlflow + azureml-mlflow + azure-identity) so it can pull
+            # the champion from the AML MLflow registry at boot/reload.
+            extra=()
+            if [ "$image" = "edgesense-inference" ]; then
+              extra+=(--build-arg "EDGESENSE_EXTRAS=--extra inference --extra registry")
+            fi
+            docker build "${extra[@]}" \
+                         -t "$acr_server/$image:$IMAGE_TAG" \
                          -t "$acr_server/$image:latest" \
                          -f "$dockerfile" "$context"
             docker push --all-tags "$acr_server/$image"

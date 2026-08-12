@@ -211,6 +211,26 @@ resource "azurerm_container_app" "inference" {
       image  = local.images.inference
       cpu    = 0.5
       memory = "1Gi"
+
+      # Phase 2.5: serve the champion from the MLflow registry instead of the
+      # baked-in bundle. Safe rollout: if the image lacks the registry extra
+      # or the registry is unreachable, the sidecar falls back to its baked-in
+      # model (inference/registry.py caps MLflow's retries so boot stays fast).
+      env {
+        name  = "EDGESENSE_MODEL_SOURCE"
+        value = var.enable_phase2_azureml ? "registry" : "file"
+      }
+      env {
+        # azureml:// tracking URI = region endpoint + the workspace resource ID
+        name  = "MLFLOW_TRACKING_URI"
+        value = var.enable_phase2_azureml ? "azureml://${azurerm_resource_group.this.location}.api.azureml.ms/mlflow/v1.0${try(azurerm_machine_learning_workspace.this[0].id, "")}" : ""
+      }
+      env {
+        # DefaultAzureCredential needs the client id to pick the user-assigned
+        # identity inside the container app.
+        name  = "AZURE_CLIENT_ID"
+        value = azurerm_user_assigned_identity.apps.client_id
+      }
     }
 
     # Wake the service on inbound HTTP.
@@ -222,7 +242,9 @@ resource "azurerm_container_app" "inference" {
 }
 
 ########################################################################
-# 3. Edge agent (Go). No ingress; connects out to broker + inference.
+# 3. Edge agent (Go). Outbound MQTT to the broker + HTTP to inference;
+#    internal ingress exposes only its Prometheus metrics (:8890) so the
+#    buffer-depth / uplink gauges become scrapeable and alertable.
 ########################################################################
 resource "azurerm_container_app" "agent" {
   name                         = "${local.name}-agent"
@@ -243,6 +265,16 @@ resource "azurerm_container_app" "agent" {
   registry {
     server   = local.registry_block.server
     identity = local.registry_block.identity
+  }
+
+  ingress {
+    external_enabled = false # metrics stay inside the environment
+    target_port      = 8890
+    transport        = "http"
+    traffic_weight {
+      latest_revision = true
+      percentage      = 100
+    }
   }
 
   # Phase 1: plain Terraform-generated secret. Phase 3 (enable_phase3 = true)
@@ -430,7 +462,7 @@ resource "azurerm_container_app" "prometheus" {
       # reach /score). Written to /tmp because the image runs as nobody.
       command = ["/bin/sh", "-c"]
       args = [
-        "printf 'global:\\n  scrape_interval: 30s\\nscrape_configs:\\n  - job_name: edgesense-inference\\n    scheme: https\\n    metrics_path: /metrics\\n    static_configs:\\n      - targets: [\"%s\"]\\n' '${azurerm_container_app.inference.ingress[0].fqdn}' > /tmp/prometheus.yml && exec /bin/prometheus --config.file=/tmp/prometheus.yml --storage.tsdb.path=/prometheus --storage.tsdb.retention.time=6h"
+        "printf 'global:\\n  scrape_interval: 30s\\nscrape_configs:\\n  - job_name: edgesense-inference\\n    scheme: https\\n    metrics_path: /metrics\\n    static_configs:\\n      - targets: [\"%s\"]\\n  - job_name: edgesense-agent\\n    scheme: https\\n    metrics_path: /metrics\\n    static_configs:\\n      - targets: [\"%s\"]\\n' '${azurerm_container_app.inference.ingress[0].fqdn}' '${azurerm_container_app.agent.name}.internal.${azurerm_container_app_environment.this.default_domain}' > /tmp/prometheus.yml && exec /bin/prometheus --config.file=/tmp/prometheus.yml --storage.tsdb.path=/prometheus --storage.tsdb.retention.time=6h"
       ]
     }
   }
