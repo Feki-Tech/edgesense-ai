@@ -186,6 +186,34 @@ the report (`edgesense_model_shadow_scored_total`,
 `…_shadow_disagreements_total{kind}`, `…_shadow_score_diff`,
 `…_shadow_errors_total`, `…_shadow_info`) for dashboards and alerting.
 
+**The report is a promotion criterion, not just a dashboard** (§2.4): pass it
+back to the gate with `--shadow-report` and the challenger must clear an
+*online* bar as well as the offline one.
+
+```bash
+python ml/promote.py --challenger ml/model/candidate/model.joblib \
+    --shadow-report http://localhost:8800/shadow
+# | shadow agreement on live traffic | — | 99.715% (4,210 readings) | ≥ 95.0% over ≥ 1,000 |
+```
+
+`--challenger` is what makes this sound. The gate normally trains a fresh
+challenger, and evidence earned by the bundle that was *actually shadowing*
+says nothing about a different one — so the gate refuses when the report's
+`shadow_version` is not the version being gated, and tells you which flag
+fixes it. Thresholds are `--shadow-min-n` (default 1 000 readings, because an
+agreement rate over a handful of readings is noise) and
+`--shadow-min-agreement` (default 95 %); any shadow scoring `errors` on live
+traffic also refuse. The accepted numbers are written into the promoted
+model's manifest (`shadow_readings`, `shadow_agreement_rate`,
+`shadow_score_mae`), so the registry entry records the online evidence the
+rollout was based on.
+
+Note what this does and does not prove. Agreement is measured against the
+champion, without labels, so it detects *behavioural divergence* — a
+challenger that would have alarmed on thousands of readings the champion
+passed — not *correctness*. Turning it into a correctness bar needs the
+labeling loop in §3.
+
 ### 2.6 Registry-driven serving — the champion reaches production
 
 §2.4 decides *which* model should serve and `ml/register_model.py` records
@@ -217,15 +245,82 @@ optional extra (`uv sync --extra inference --extra registry`) so the default
 file-backed image stays small. Pulls are counted in
 `edgesense_model_registry_pulls_total{result}`.
 
+### 2.7 Signed artifacts — trusting a model that arrived over the air
+
+A bundle is a joblib pickle, so `joblib.load` on one is arbitrary code
+execution: whoever can write the artifact owns the inference container
+(SECURITY.md S6). While the model was baked into the image at build time that
+risk was bounded by the image supply chain. §2.6 changed that — a model now
+arrives from a registry at runtime, and "the file is on disk" stopped being
+evidence that it came from this pipeline.
+
+`ml/signing.py` closes the gap with **Ed25519 detached signatures**: training
+signs the artifact bytes, serving verifies them **before** `joblib.load` sees
+them.
+
+```bash
+make keygen                                    # ml/keys/ (gitignored)
+EDGESENSE_SIGNING_KEY=ml/keys/edgesense-signing.pem make train
+make verify-model
+# → verified: ml/model/model.joblib signed by key ca6ff17f0300592b at …
+```
+
+The signature is a sidecar next to the bundle (`model.joblib.sig`) recording
+the algorithm, a sha256 of the artifact, the signing `key_id` and the model
+version it covers. What is signed is a domain-separated digest
+(`b"edgesense-model-signature-v1\n" + sha256_hex`) — the prefix stops a
+signature being replayed as one over a different kind of payload, and signing
+the digest lets a verifier distinguish "these bytes are not the ones that were
+signed" (corruption or swap) from "this signature does not verify" (wrong or
+untrusted key). The manifest lives *inside* the bundle, so the digest covers
+it too; the sidecar `model.manifest.json` is a derivative copy and is not
+signed on its own.
+
+| Variable | Role |
+|---|---|
+| `EDGESENSE_SIGNING_KEY` | private key (path or inline PEM) — training signs when set |
+| `EDGESENSE_TRUSTED_KEYS` | public keys a node accepts (path or inline PEM; several PEM blocks = key rotation) |
+| `EDGESENSE_REQUIRE_SIGNATURE` | refuse anything not positively verified |
+
+Verification runs on **every** load path — the baked-in bundle at startup, a
+`POST /reload`, a registry pull, and a shadow candidate — and reports one of
+three states on `/healthz` and in
+`edgesense_model_signature_checks_total{result}`:
+
+- **verified** — signed by a trusted key and the bytes match,
+- **unsigned** — no sidecar (every bundle built before this feature),
+- **unverifiable** — signed, but this node has no trust store to check against.
+
+Rollout is deliberately backward compatible: unsigned bundles keep serving
+until `EDGESENSE_REQUIRE_SIGNATURE` is set, so signing can be introduced
+without a flag day. Two things are fatal regardless: a signature that is
+*present but does not verify* is always refused (that is tamper evidence, not
+a legacy artifact), and a registry champion that fails verification is **not**
+quietly replaced by the baked-in fallback the way an unreachable registry is —
+an unreachable registry is an availability problem, a bad signature is an
+attack, and the two must not look the same from the outside.
+
+```bash
+curl -X POST localhost:8800/reload
+# → 400 {"detail":"reload rejected, keeping 20260809.153510+811d2bf:
+#         model.joblib does not match its signature: sha256 d5861be6… but the
+#         signature covers 348cd107…"}
+```
+
+Not yet covered (SECURITY.md P4's other half): serving still deserializes a
+pickle *after* verification. Moving the serving path to ONNX-only would remove
+the deserialization primitive rather than gate it. And the CI/AML retrain job
+does not hold a signing key yet, so models promoted by the automated loop are
+registered unsigned — wiring `EDGESENSE_SIGNING_KEY` from Key Vault into
+`retrain_job.yml` is what makes the whole loop signed end-to-end.
+
 ## 3. Phase 2+ outlook
 
-- **OTA model delivery to the edge** — ship promoted bundles to devices as
-  signed artifacts (snap refresh or registry download), with signature
-  verification before `/reload` per SECURITY.md §5/P4; the manifest's hash
-  and version make the artifact verifiable end-to-end.
-- **Gate + shadow integration** — feed the shadow's live agreement report
-  (§2.5) back into `promote.py` as an additional promotion criterion, so the
-  offline bar is complemented by online evidence before rollout.
+- **OTA model delivery to the edge** — artifacts are signed and verified
+  before load (§2.7) and the registry pull (§2.6) is the delivery channel;
+  what remains is *pushing* to devices that do not poll a registry — snap
+  refresh or a device-side pull agent — and giving the AML retrain job a
+  signing key so automated promotions are signed too.
 - **Feedback loop & labeling** — capture operator confirm/dismiss verdicts
   on events, build a labeled corpus per machine, and feed it to evaluation
   (and eventually training) with the provenance recording the manifest
@@ -244,10 +339,13 @@ file-backed image stays small. Pulls are counted in
 ## 4. Running everything
 
 ```bash
-make train           # train + validate; writes bundle + manifest + model card
+make keygen          # Ed25519 signing keypair -> ml/keys/ (gitignored)
+make train           # train + validate; writes bundle + manifest + model card (+ .sig)
+make verify-model    # check the champion's signature (see §2.7)
 make eval            # offline evaluation -> docs/EVALUATION.md
 make promote         # champion/challenger gate (see §2.4)
 make export-onnx     # ONNX graph + sidecar metadata
 make inference       # serve: POST /score · GET /healthz · GET /metrics · POST /reload · /shadow*
-pytest tests/test_manifest.py tests/test_drift.py tests/test_reload.py tests/test_promote.py tests/test_shadow.py
+pytest tests/test_manifest.py tests/test_drift.py tests/test_reload.py \
+       tests/test_promote.py tests/test_shadow.py tests/test_signing.py
 ```

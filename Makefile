@@ -3,7 +3,7 @@
 PY := uv run python
 MACHINES ?= 10
 
-.PHONY: setup deps broker broker-down train export-onnx inference agent simulate dashboard mcp smoke test snap stack stack-down stack-logs stack-coap stack-secure stack-secure-down check-acl demo demo-offline demo-offline-coap eval benchmark benchmark-rotating fleet promote promote-torch
+.PHONY: keygen verify-model setup deps broker broker-down train export-onnx inference agent simulate dashboard mcp smoke test snap stack stack-down stack-logs stack-coap stack-secure stack-secure-down check-acl demo demo-offline demo-offline-coap eval benchmark benchmark-rotating fleet promote promote-torch
 
 stack:
 	docker compose up -d --build
@@ -37,6 +37,12 @@ demo-offline-coap: ## same outage demo for the CoAP stack (stops+restarts the re
 
 eval:            ## offline model evaluation -> docs/EVALUATION.md
 	$(PY) ml/evaluate.py --out docs/EVALUATION.md
+
+keygen:          ## generate the Ed25519 model-signing keypair (ml/keys/, gitignored)
+	$(PY) ml/signing.py keygen
+
+verify-model:    ## verify the champion bundle's signature (see docs/MLOPS.md §2.7)
+	$(PY) ml/signing.py verify ml/model/model.joblib
 
 promote:         ## champion/challenger gate: train, evaluate both, promote or refuse
 	$(PY) ml/promote.py

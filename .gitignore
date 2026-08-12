@@ -3,6 +3,10 @@ __pycache__/
 *.pyc
 ml/model/
 ml/data/
+# model-signing keys (ml/signing.py) — the private key must never be committed,
+# and the public key belongs in the deployment's trust store, not the repo
+ml/keys/
+*.pem
 .idea/
 .vscode/
 edge-agent/edge-agent

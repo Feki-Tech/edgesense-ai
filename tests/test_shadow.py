@@ -36,6 +36,33 @@ def _candidate(small_model_path, version: str = "20990101.000000+cand0000",
     return bundle
 
 
+def test_live_report_feeds_the_promotion_gate(served, small_model_path,
+                                              tmp_path) -> None:
+    """The sidecar's report must be exactly what ml/promote.py can gate on.
+
+    These two halves are wired together only by the shape of this JSON, so a
+    silent change on either side would otherwise surface as a refused promotion
+    in production rather than as a failing test here.
+    """
+    import json
+
+    from ml.promote import QualityBar, check_shadow, load_shadow_report
+
+    client, _, candidate_path = served
+    save_bundle(_candidate(small_model_path), candidate_path)
+    client.post("/shadow/load")
+    for _ in range(50):
+        client.post("/score", json=NOMINAL)
+
+    archived = tmp_path / "shadow.json"  # the way CI would hand it to the gate
+    archived.write_text(json.dumps(client.get("/shadow").json()), encoding="utf-8")
+
+    report = load_shadow_report(str(archived))
+    assert report["n"] == 50
+    assert check_shadow(report, "20990101.000000+cand0000",
+                        QualityBar(shadow_min_n=50)) == []
+
+
 def test_no_shadow_by_default(served) -> None:
     client, _, _ = served
     assert client.get("/shadow").json() == {"active": False}

@@ -28,6 +28,13 @@ Registry-driven serving (phase 2.5 — the champion reaches production):
 - POST /reload?source=registry pulls a freshly promoted champion on demand,
   through the same validate-before-swap path as a file reload.
 
+Signature verification (docs/MLOPS.md §2.7): every artifact — baked-in, hot
+reloaded, pulled from the registry or loaded as a shadow — has its Ed25519
+signature checked *before* joblib.load deserializes it, because a bundle is a
+pickle and loading one is arbitrary code execution. Unsigned bundles still load
+unless EDGESENSE_REQUIRE_SIGNATURE is set; a signature that is present but does
+not verify is always fatal. /healthz reports which of the three it was.
+
 Shadow scoring (§2.5 of docs/MLOPS.md — online champion/challenger evidence):
 
 - POST /shadow/load    load the candidate bundle (EDGESENSE_SHADOW_MODEL,
@@ -54,6 +61,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from inference import metrics  # noqa: E402
 from inference.drift import DEFAULT_WINDOW, DriftTracker  # noqa: E402
 from inference.shadow import ShadowTracker  # noqa: E402
+from ml import signing  # noqa: E402
 from ml.scoring import _ACTIVATIONS, score_sample  # noqa: E402
 
 MODEL_PATH = Path(os.environ.get(
@@ -76,11 +84,13 @@ class _ModelState:
     """Immutable snapshot of a loaded bundle; swapped atomically on reload."""
 
     def __init__(self, bundle: dict, path: Path, *, source: str = "file",
-                 registry_version: str | None = None) -> None:
+                 registry_version: str | None = None,
+                 signature: str = signing.UNSIGNED) -> None:
         self.bundle = bundle
         self.path = path
         self.source = source
         self.registry_version = registry_version
+        self.signature = signature
         self.features: list[str] = list(bundle["features"])
         manifest = bundle.get("manifest") or {}
         self.model_version: str = manifest.get("model_version", "unknown")
@@ -135,21 +145,43 @@ def _validate_bundle(bundle: object) -> dict:
     return bundle
 
 
-def _load_state(path: Path) -> _ModelState:
-    return _ModelState(_validate_bundle(joblib.load(path)), path)
+def _verify_artifact(path: Path) -> str:
+    """Check the artifact's signature *before* joblib.load deserializes it.
+
+    A bundle is a pickle, so loading one runs whatever it contains: this is the
+    last moment at which an artifact that arrived over the air can still be
+    refused (docs/SECURITY.md S6/P4). Returns the verification status; raises
+    signing.VerificationError when the artifact must not be loaded.
+    """
+    try:
+        status, _ = signing.verify_artifact(path)
+    except signing.VerificationError:
+        metrics.SIGNATURE_CHECKS.labels(result="rejected").inc()
+        raise
+    metrics.SIGNATURE_CHECKS.labels(result=status).inc()
+    return status
+
+
+def _load_state(path: Path, *, source: str = "file",
+                registry_version: str | None = None) -> _ModelState:
+    """Verify, load and validate a bundle file into a servable state."""
+    status = _verify_artifact(path)
+    return _ModelState(_validate_bundle(joblib.load(path)), path, source=source,
+                       registry_version=registry_version, signature=status)
 
 
 def _load_registry_state() -> _ModelState:
     """Fetch the registry champion and validate it with the serving arithmetic.
 
-    Raises whatever the registry layer raises (RegistryError) or ValueError
-    from validation — callers decide whether that is fatal.
+    Raises whatever the registry layer raises (RegistryError), ValueError from
+    validation, or VerificationError from the signature check — callers decide
+    which of those are fatal.
     """
     from inference.registry import fetch_champion
 
     ref = fetch_champion(MODEL_NAME)
-    return _ModelState(_validate_bundle(joblib.load(ref.path)), ref.path,
-                       source="registry", registry_version=ref.registry_version)
+    return _load_state(ref.path, source="registry",
+                       registry_version=ref.registry_version)
 
 
 def _load_source_state(source: str) -> _ModelState:
@@ -170,6 +202,12 @@ def _initial_state() -> _ModelState:
         return _load_state(MODEL_PATH)
     try:
         state = _load_registry_state()
+    except signing.VerificationError:
+        # An unreachable registry is an availability problem; an artifact that
+        # fails verification is an attack. Never paper over the second one by
+        # quietly serving something else — fail loudly instead.
+        metrics.REGISTRY_PULLS.labels(result="failed").inc()
+        raise
     except Exception as exc:
         metrics.REGISTRY_PULLS.labels(result="failed").inc()
         print(f"registry champion unavailable ({exc}); falling back to {MODEL_PATH}",
@@ -222,7 +260,8 @@ def healthz() -> dict:
     return {"status": "ok", "model": str(state.path), "features": state.features,
             "model_kind": state.bundle.get("kind", "iforest"),
             "model_version": state.model_version, "created_at": state.created_at,
-            "model_source": state.source, "registry_version": state.registry_version}
+            "model_source": state.source, "registry_version": state.registry_version,
+            "signature": state.signature}
 
 
 @app.post("/score")

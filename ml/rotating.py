@@ -139,12 +139,47 @@ def read_mat_columns(path: Path,
     if cols is not None:
         return cols
 
-    # Fall back to a single 5-column matrix (Time Stamp + the four axes).
-    for value in mat.values():
-        arr = np.asarray(value)
-        if arr.ndim == 2 and arr.shape[1] >= len(names) + 1:
-            return {n: arr[:, i + 1].astype(float) for i, n in enumerate(names)}
-    raise DatasetError(f"{path.name}: no {names} columns and no 5-column matrix")
+    # Fall back to a matrix of samples. The published archives are Siemens LMS
+    # Test.Lab exports — one `Signal` struct whose `y_values.values` is an
+    # (n_samples, 4) matrix, one column per accelerometer axis in the
+    # documented order — but accept a flat matrix with a leading time column
+    # too, since the dataset docs describe the columns that way.
+    for key, value in mat.items():
+        if key.startswith("__"):
+            continue
+        for arr in _numeric_matrices(value):
+            if arr.shape[1] == len(names):
+                return {n: arr[:, i].astype(float) for i, n in enumerate(names)}
+            if arr.shape[1] == len(names) + 1:  # Time Stamp + the axes
+                return {n: arr[:, i + 1].astype(float) for i, n in enumerate(names)}
+    raise DatasetError(f"{path.name}: no {names} columns and no "
+                       f"{len(names)}/{len(names) + 1}-column sample matrix")
+
+
+def _numeric_matrices(obj, _depth: int = 0):
+    """Yield 2-D numeric arrays nested anywhere inside a ``loadmat`` value.
+
+    MATLAB structs come back as structured/object ndarrays (or ``np.void``
+    scalars under ``squeeze_me=True``); this walks through them so a matrix
+    like ``Signal.y_values.values`` is found without hard-coding the nesting.
+    """
+    if _depth > 6:
+        return
+    if isinstance(obj, np.void) and obj.dtype.names:
+        for name in obj.dtype.names:
+            yield from _numeric_matrices(obj[name], _depth + 1)
+        return
+    if not isinstance(obj, np.ndarray):
+        return
+    if obj.dtype.kind in "fiu":
+        if obj.ndim == 2 and obj.shape[0] > obj.shape[1]:
+            yield obj
+    elif obj.dtype.names:
+        for name in obj.dtype.names:
+            yield from _numeric_matrices(obj[name], _depth + 1)
+    elif obj.dtype == object:
+        for item in obj.flat:
+            yield from _numeric_matrices(item, _depth + 1)
 
 
 def _read_mat_v73(path: Path, names: "tuple[str, ...]") -> "dict[str, np.ndarray]":
@@ -180,9 +215,42 @@ def read_tdms_columns(path: Path,
             for channel in group.channels():
                 if channel.name in names and channel.name not in found:
                     found[channel.name] = np.asarray(channel[:]).squeeze().astype(float)
-    missing = [n for n in names if n not in found]
+        missing = [n for n in names if n not in found]
+        if missing:
+            found = _tdms_by_sensor_type(tdms, names)
+            missing = [n for n in names if n not in found]
     if missing:
         raise DatasetError(f"{path.name}: missing channels {missing}")
+    return found
+
+
+# The published archives name channels after the DAQ hardware
+# ("cDAQ9185-…Mod1/ai0"), not after what they measure; the sensor type in the
+# channel metadata is what identifies them. Requested names map to a type via
+# the module constants, and channels of a type are taken in file order — for
+# this dataset that is (housing A, housing B) and (U, V, W), matching the
+# documented column order.
+_SENSOR_TYPES = {**{n: "Temperature" for n in TEMPERATURE_CHANNELS},
+                 **{n: "Current" for n in CURRENT_CHANNELS}}
+
+
+def _tdms_by_sensor_type(tdms, names: "tuple[str, ...]") -> "dict[str, np.ndarray]":
+    """Map requested channel names onto channels by their recorded sensor type."""
+    by_type: dict[str, list] = {}
+    for group in tdms.groups():
+        for channel in group.channels():
+            kind = channel.properties.get("DAC~Channel~Type")
+            if kind:
+                by_type.setdefault(kind, []).append(channel)
+
+    found: dict[str, np.ndarray] = {}
+    for kind in {_SENSOR_TYPES[n] for n in names if n in _SENSOR_TYPES}:
+        wanted = [n for n in names if _SENSOR_TYPES.get(n) == kind]
+        have = by_type.get(kind, [])
+        if len(have) != len(wanted):
+            continue  # ambiguous — let the caller report the names as missing
+        for name, channel in zip(wanted, have):
+            found[name] = np.asarray(channel[:]).squeeze().astype(float)
     return found
 
 
@@ -206,9 +274,20 @@ def reduce_to_readings(vibration: "dict[str, np.ndarray]",
     if size < 1:
         raise ValueError("reading_rate must be lower than sample_rate")
 
-    vib = np.vstack([vibration[c] for c in VIBRATION_CHANNELS])
-    temp = np.vstack([temp_current[c] for c in TEMPERATURE_CHANNELS])
-    cur = np.vstack([temp_current[c] for c in CURRENT_CHANNELS])
+    def stack(mapping: "dict[str, np.ndarray]", channels: "tuple[str, ...]",
+              what: str) -> np.ndarray:
+        # Drop channels that are present but empty: the published BPFO
+        # recordings logged only the U-phase current. A balanced 3-phase
+        # motor draws near-identical per-phase RMS, so averaging over the
+        # phases that exist keeps the reading comparable.
+        arrays = [mapping[c] for c in channels if mapping[c].size]
+        if not arrays:
+            raise DatasetError(f"every {what} channel is empty")
+        return np.vstack(arrays)
+
+    vib = stack(vibration, VIBRATION_CHANNELS, "vibration")
+    temp = stack(temp_current, TEMPERATURE_CHANNELS, "temperature")
+    cur = stack(temp_current, CURRENT_CHANNELS, "current")
 
     n = _window_count([vib.shape[1], temp.shape[1], cur.shape[1]], size)
     if n < 1:

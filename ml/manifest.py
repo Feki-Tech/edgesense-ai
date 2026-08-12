@@ -9,6 +9,10 @@ and how it performed at training time (metrics snapshot). The manifest is
 - written as a sidecar ``<bundle>.manifest.json`` next to the bundle, with a
   human-readable ``MODEL_CARD.md`` rendered from it.
 
+``save_bundle`` also signs the artifact when a signing key is configured
+(``<bundle>.sig``, see ``ml/signing.py``) — the manifest says what a model *is*,
+the signature says the bytes really came from this pipeline.
+
 Version scheme: ``{YYYYMMDD.HHMMSS}+{git7}`` (UTC) — sortable, unique per
 retrain, traceable to a commit. Inside Docker builds ``.git`` is not part of
 the context, so the commit falls back to the ``EDGESENSE_GIT_COMMIT`` build
@@ -163,15 +167,44 @@ def _atomic_write_bytes(path: Path, data: bytes) -> None:
         raise
 
 
-def _atomic_dump_joblib(bundle: dict, path: Path) -> None:
+def _atomic_dump_joblib(bundle: dict, path: Path, before_replace=None) -> None:
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".tmp")
     os.close(fd)
     try:
         joblib.dump(bundle, tmp)
+        if before_replace is not None:
+            before_replace(Path(tmp))
         os.replace(tmp, path)
     except BaseException:
         Path(tmp).unlink(missing_ok=True)
         raise
+
+
+def _signing_hook(bundle: dict, path: Path):
+    """Hook that signs the temp artifact before it is moved to ``path``.
+
+    Returns None when no signing key is configured — the default, so unsigned
+    bundles keep working (see ``ml/signing.py``).
+
+    The signature is published *before* the artifact it covers is moved into
+    place, so the pair is never inconsistent in the dangerous direction: a
+    reader that catches the window sees a signature for an artifact it does not
+    have yet and refuses the reload, keeping the old model serving. The reverse
+    order would briefly present a new artifact as covered by the old signature.
+    """
+    from ml import signing
+
+    key = signing.load_private_key()
+    if key is None:
+        return None
+    version = (bundle.get("manifest") or {}).get("model_version")
+
+    def sign(tmp_path: Path) -> None:
+        signing.sign_artifact(tmp_path, key, model_version=version,
+                              sig_path=signing.signature_path(path),
+                              artifact_name=path.name)
+
+    return sign
 
 
 def save_bundle(bundle: dict, path: "Path | str") -> Path:
@@ -179,10 +212,21 @@ def save_bundle(bundle: dict, path: "Path | str") -> Path:
 
     Returns the bundle path. Files are written via temp-file + ``os.replace``
     so a concurrently reloading server never observes a half-written model.
+
+    When ``EDGESENSE_SIGNING_KEY`` is configured the artifact is also signed
+    (``model.joblib.sig``). When it is not, any signature left over from an
+    earlier signed save is removed: a sidecar describing a *different* artifact
+    is worse than none, and ``EDGESENSE_REQUIRE_SIGNATURE`` is what stops an
+    unsigned bundle from serving.
     """
+    from ml.signing import signature_path
+
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    _atomic_dump_joblib(bundle, path)
+    sign = _signing_hook(bundle, path)
+    _atomic_dump_joblib(bundle, path, sign)
+    if sign is None:
+        signature_path(path).unlink(missing_ok=True)
 
     manifest = bundle.get("manifest")
     if manifest:
