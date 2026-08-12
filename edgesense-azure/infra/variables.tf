@@ -37,3 +37,15 @@ variable "enable_phase3" {
   type        = bool
   default     = false
 }
+
+variable "prometheus_auth_user" {
+  description = "Basic-auth username for the Prometheus container app's public ingress (Grafana uses it as data source credentials)."
+  type        = string
+  default     = "grafana"
+}
+
+variable "prometheus_auth_bcrypt" {
+  description = "Bcrypt hash of the Prometheus basic-auth password (precomputed, e.g. python -c \"import bcrypt; print(bcrypt.hashpw(pw, bcrypt.gensalt()).decode())\" — Terraform's own bcrypt() re-salts every run and would churn revisions). The plaintext lives in Key Vault (prometheus-basic-auth) and in the Grafana data source, not in Terraform."
+  type        = string
+  sensitive   = true
+}

@@ -80,20 +80,27 @@ The steps below are what remains to close the loop.
 ### Setup
 
 1. Apply Phase 3 (`terraform apply`) — this now also creates the Prometheus
-   app. Take `terraform output prometheus_datasource_url` and add it in Grafana
-   as a **Prometheus data source with UID `edgesense-prom`** (that exact UID is
-   what the alert rule references).
-2. Create the **alert rule** on the PSI metric (>0.2 for 10m) — same rule as
+   app. Its ingress is **external with Prometheus basic auth**: Managed
+   Grafana runs outside the Container Apps environment (no VNet integration
+   here), so an internal-only ingress would be unreachable from it. The
+   bcrypt hash of the password goes in via the `prometheus_auth_bcrypt`
+   variable (tfvars, gitignored); the plaintext credentials live in Key Vault
+   as `prometheus-basic-auth` (`user:password`).
+2. Take `terraform output prometheus_datasource_url` and add it in Grafana as
+   a **Prometheus data source with UID `edgesense-prom`** (that exact UID is
+   what the alert rule references), with basic auth set to the Key Vault
+   credentials.
+3. Create the **alert rule** on the PSI metric (>0.2 for 10m) — same rule as
    `deploy/grafana/provisioning/alerting/edgesense-drift.yml` in the repo.
-3. Create a **contact point** of type Webhook:
+4. Create a **contact point** of type Webhook:
    - URL: `https://api.github.com/repos/Feki-Tech/edgesense-ai/dispatches`
    - Method: POST, body: `{"event_type": "drift-alert"}`
    - Header `Authorization: Bearer <fine-grained PAT, contents: read+write>`
      (store the PAT in Key Vault; paste into Grafana once)
    - Header `Accept: application/vnd.github+json`
-4. Add repo variable `AML_WORKSPACE` (= `edgesense-mlw`) next to the existing
+5. Add repo variable `AML_WORKSPACE` (= `edgesense-mlw`) next to the existing
    Azure OIDC variables.
-5. Test end-to-end without waiting for real drift:
+6. Test end-to-end without waiting for real drift:
    `gh workflow run retrain-on-drift.yml` (manual trigger), or inject drift
    with the simulator's fault control topic and watch the whole loop fire.
    The loop is only proven once a run shows trigger event
