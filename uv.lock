@@ -784,6 +784,7 @@ name = "edgesense-ai"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
+    { name = "cryptography" },
     { name = "joblib" },
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
@@ -844,6 +845,7 @@ dev = [
 requires-dist = [
     { name = "azure-identity", marker = "extra == 'registry'" },
     { name = "azureml-mlflow", marker = "extra == 'registry'" },
+    { name = "cryptography" },
     { name = "fastapi", marker = "extra == 'inference'" },
     { name = "h5py", marker = "extra == 'benchmark'" },
     { name = "joblib" },

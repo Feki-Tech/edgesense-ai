@@ -62,6 +62,12 @@ REGISTRY_PULLS = Counter(
     "Champion fetches from the MLflow model registry, by result",
     ["result"], registry=REGISTRY)
 
+SIGNATURE_CHECKS = Counter(
+    "edgesense_model_signature_checks_total",
+    "Artifact signature checks before load: verified, unsigned, unverifiable "
+    "(signed but no trust store) or rejected (tampered/untrusted/required)",
+    ["result"], registry=REGISTRY)
+
 SHADOW_SCORED = Counter(
     "edgesense_model_shadow_scored_total",
     "Readings also scored by the shadow (challenger) model",

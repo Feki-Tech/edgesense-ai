@@ -11,6 +11,10 @@ dependencies = [
     "numpy",
     "scikit-learn",
     "joblib",
+    # Ed25519 model-artifact signing (ml/signing.py). Base, not an extra: the
+    # training side signs and the serving side must always be able to verify —
+    # a security control you can forget to install is not a control.
+    "cryptography",
 ]
 
 [project.optional-dependencies]
