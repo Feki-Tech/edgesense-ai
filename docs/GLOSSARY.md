@@ -169,13 +169,31 @@ diff table. CI-ready exit codes; run via `make promote` or the `model-gate` work
 in-memory model; scoring never sees a half-swapped bundle and an invalid file leaves
 the old model serving (`inference/server.py`).
 
-**Shadow deployment** ***(proposed)*** — serving the champion while a challenger scores
-the same readings without acting on them, so promotion decisions gain live-traffic
-evidence on top of the offline bar (MLOPS.md phase 2+).
+**Shadow deployment** — serving the champion while a challenger scores the same
+readings without acting on them, so promotion decisions gain live-traffic evidence on
+top of the offline bar. Shipped: `POST /shadow/load` on the sidecar, and the resulting
+agreement report is a promotion criterion via `promote.py --shadow-report`
+(MLOPS.md §2.5).
 
-**OTA model update** ***(proposed)*** — delivering promoted bundles to edge devices
-over the air as signed artifacts with signature verification before reload
-([`SECURITY.md`](SECURITY.md) §5/P4, MLOPS.md phase 2+).
+**Agreement rate** — the fraction of readings on which a shadow and the champion reach
+the same verdict. Measured without labels, so it detects behavioural *divergence*, not
+correctness — a low rate says the two models would act differently, not which is right.
+
+**Model signing** — an Ed25519 detached signature over a sha256 of the model artifact,
+written beside the bundle as `model.joblib.sig` and verified *before* `joblib.load`
+deserializes it. Verification states: `verified`, `unsigned`, `unverifiable` (signed but
+no trust store on this node); `EDGESENSE_REQUIRE_SIGNATURE` makes anything but
+`verified` fatal (`ml/signing.py`, MLOPS.md §2.7).
+
+**Trust store** — the set of public keys a node accepts model signatures from
+(`EDGESENSE_TRUSTED_KEYS`). Holding several keys at once is what makes key rotation
+possible: trust the incoming key alongside the outgoing one, re-sign, then drop the old.
+
+**OTA model update** — delivering promoted bundles to edge devices over the air as
+signed artifacts with signature verification before reload
+([`SECURITY.md`](SECURITY.md) §5/P4). Partly shipped: the registry pull (MLOPS.md §2.6)
+is the channel and signatures are verified on every load path (§2.7); *pushing* to
+devices that do not poll a registry is still outlook.
 
 **Model registry** ***(proposed)*** — the service holding model artifacts, manifests
 and promotion history per org/site, replacing bake-at-build with pull-by-version

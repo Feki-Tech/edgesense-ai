@@ -557,7 +557,8 @@ Notes:
 - [ ] Alerting: Grafana alert rules on buffer depth / uplink downtime (drift alert shipped with MLOps phase 1)
 - [ ] Inference service as a second snap; model updates as snap refreshes
 - [x] MLOps phase 2.5: serve the registered champion from the Azure ML/MLflow registry instead of baking it at build time ([`docs/MLOPS.md`](docs/MLOPS.md) §2.6)
-- [ ] MLOps phase 2 (remaining): OTA model delivery with signature verification, feedback/labeling loop, per-machine thresholds, per-tenant registry (outlook in [`docs/MLOPS.md`](docs/MLOPS.md))
+- [x] MLOps: Ed25519-signed model artifacts, verified before load on every path ([`docs/MLOPS.md`](docs/MLOPS.md) §2.7), and shadow agreement as a promotion criterion ([`docs/MLOPS.md`](docs/MLOPS.md) §2.5)
+- [ ] MLOps phase 2 (remaining): OTA push to non-polling devices, pickle-free (ONNX-only) serving, feedback/labeling loop, per-machine thresholds, per-tenant registry (outlook in [`docs/MLOPS.md`](docs/MLOPS.md))
 
 ## Platform vision
 
@@ -572,8 +573,9 @@ assessment, a STRIDE + ML threat model, data/application/device security, and a 
 
 [`docs/MLOPS.md`](docs/MLOPS.md) is the MLOps chapter: the model lifecycle
 (train → calibrate → bake → serve), phase 1 (manifest & versioning, drift
-detection, hot reload, promotion gate) and the phase-2+ outlook (OTA model
-delivery, shadow scoring, feedback loop, registry).
+detection, hot reload, promotion gate), signed artifacts and shadow-gated
+promotion, and the phase-2+ outlook (feedback loop, per-machine thresholds,
+per-tenant registry).
 
 [`docs/HARDWARE.md`](docs/HARDWARE.md) is the hardware chapter: replacing the simulator
 with real sensors on real machines — edge compute tiers, sensor selection, signal
